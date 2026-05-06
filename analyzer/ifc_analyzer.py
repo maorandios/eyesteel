@@ -7,9 +7,12 @@ import ifcopenshell
 from .debug import debug_entity
 from .extractors import (
     extract_assembly_data,
+    extract_fastener_data,
     extract_part_data,
     get_entity_psets,
-    iter_assembly_parts,
+    is_connection_bolt_row,
+    is_fastener_entity,
+    iter_assembly_leaf_products,
 )
 from .units import build_unit_converter
 
@@ -25,15 +28,23 @@ def extract_model_data(ifc_file: str, debug: bool = False) -> dict[str, list[dic
         assembly_hits: list[str] = []
         assembly_out = extract_assembly_data(assembly, converter, debug_hits=assembly_hits)
         assembly_out["parts"] = []
+        assembly_out["bolts"] = []
 
         if debug:
             debug_entity(assembly, get_entity_psets(assembly), assembly_hits)
 
-        for part in iter_assembly_parts(assembly):
+        for part in iter_assembly_leaf_products(assembly):
             part_hits: list[str] = []
-            part_out = extract_part_data(part, converter, debug_hits=part_hits)
-            assembly_out["parts"].append(part_out)
-            parts_index[part_out["id"]] = part_out
+            if is_fastener_entity(part):
+                bolt_out = extract_fastener_data(part, converter, debug_hits=part_hits)
+                if not is_connection_bolt_row(part, bolt_out):
+                    continue
+                assembly_out["bolts"].append(bolt_out)
+                parts_index[bolt_out["id"]] = bolt_out
+            else:
+                part_out = extract_part_data(part, converter, debug_hits=part_hits)
+                assembly_out["parts"].append(part_out)
+                parts_index[part_out["id"]] = part_out
 
             if debug:
                 debug_entity(part, get_entity_psets(part), part_hits)

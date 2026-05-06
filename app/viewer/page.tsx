@@ -13,7 +13,14 @@ import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
 import { he } from "@/lib/i18n/he";
-import type { AnalyzerAssembly, AnalyzerPart } from "@/types/domain";
+import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
+import { isAnalyzerBoltRow } from "@/types/domain";
+import {
+  AssemblyPickDetailPanel,
+  PartPickDetailPanel,
+  displayPartMark,
+  formatKgPlain,
+} from "@/components/viewer/SelectionPickDetails";
 
 type SelectionMode = "part" | "assembly";
 
@@ -90,12 +97,13 @@ export default function ViewerPage() {
   }, [analyzerData, search]);
 
   const filteredParts = useMemo(() => {
-    const list = analyzerData?.parts ?? [];
+    const list = (analyzerData?.parts ?? []).filter((p): p is AnalyzerPart => !isAnalyzerBoltRow(p));
     const q = search.trim().toLowerCase();
     if (!q) return list;
     return list.filter(
       (p) =>
         (p.tag || "").toLowerCase().includes(q) ||
+        (p.partMark || "").toLowerCase().includes(q) ||
         (p.name || "").toLowerCase().includes(q) ||
         (p.profile || "").toLowerCase().includes(q) ||
         (p.material || "").toLowerCase().includes(q),
@@ -120,21 +128,26 @@ export default function ViewerPage() {
         await engine.clearHighlight();
         return;
       }
-      const itemIds = assembly.parts
+      const steelIds = assembly.parts
         .map((part) => part.expressId)
         .filter((n): n is number => typeof n === "number");
+      const boltIds = (assembly.bolts ?? [])
+        .map((b) => b.expressId)
+        .filter((n): n is number => typeof n === "number");
+      const itemIds = [...steelIds, ...boltIds];
       await engine.highlightItemIds(itemIds);
       await engine.focusItemIds(itemIds);
       setActiveSheet("details");
+      const boltCount = assembly.bolts?.length ?? 0;
       setSelectionStatus(
-        `Assembly: ${assembly.assemblyMark || assembly.name || assembly.id} (${itemIds.length} פריטים)`,
+        `Assembly: ${assembly.assemblyMark || assembly.name || assembly.id} (${assembly.parts.length} חלקים${boltCount ? `, ${boltCount} ברגים` : ""})`,
       );
     },
     [engine, setActiveSheet],
   );
 
   const selectPart = useCallback(
-    async (part: AnalyzerPart | null) => {
+    async (part: AnalyzerIndexedEntity | null) => {
       setSelectedPartId(part?.id ?? null);
       setSelectedAssemblyId(null);
       if (!engine) return;
@@ -146,7 +159,32 @@ export default function ViewerPage() {
       await engine.highlightItemIds(itemIds);
       await engine.focusItemIds(itemIds);
       setActiveSheet("details");
-      setSelectionStatus(`Part: ${part.tag || part.name || part.id}`);
+      setSelectionStatus(
+        isAnalyzerBoltRow(part)
+          ? `בורג: ${part.boltName || part.name || part.id}`
+          : `חלק: ${displayPartMark(part as AnalyzerPart)}`,
+      );
+    },
+    [engine, setActiveSheet],
+  );
+
+  const selectPartInstances = useCallback(
+    async (instances: AnalyzerPart[]) => {
+      const first = instances[0];
+      if (!first) return;
+      setSelectedPartId(first.id);
+      setSelectedAssemblyId(null);
+      if (!engine) return;
+      const itemIds = instances
+        .map((p) => p.expressId)
+        .filter((n): n is number => typeof n === "number");
+      await engine.highlightItemIds(itemIds);
+      await engine.focusItemIds(itemIds);
+      setActiveSheet("details");
+      const label = displayPartMark(first);
+      setSelectionStatus(
+        instances.length > 1 ? `${label} · ${instances.length} פריטים` : `חלק: ${label}`,
+      );
     },
     [engine, setActiveSheet],
   );
@@ -154,7 +192,6 @@ export default function ViewerPage() {
   useEffect(() => {
     if (!engine || !analyzerData) return;
     engine.setPickCallback(async (hit) => {
-      console.log("Pick hit:", hit, "mode:", selectionMode);
       const part =
         analyzerData.parts.find((p) => p.expressId === hit.itemId) ||
         analyzerData.parts.find((p) => p.expressId === hit.localId);
@@ -166,8 +203,10 @@ export default function ViewerPage() {
       }
 
       if (selectionMode === "assembly") {
-        const assembly = analyzerData.assemblies.find((a) =>
-          a.parts.some((p) => p.id === part.id),
+        const assembly = analyzerData.assemblies.find(
+          (a) =>
+            a.parts.some((p) => p.id === part.id) ||
+            (a.bolts ?? []).some((b) => b.id === part.id),
         );
         if (assembly) {
           await selectAssembly(assembly);
@@ -276,89 +315,91 @@ export default function ViewerPage() {
       </BottomSheet>
 
       {showDataPanel && (
-        <aside className="absolute right-0 top-0 z-30 h-full w-[22rem] max-w-[85vw] border-l border-zinc-700 bg-zinc-950/95 p-4 pt-24 shadow-2xl">
-          <div className="mb-3 flex items-center justify-between">
+        <aside className="absolute right-0 top-0 z-30 h-full w-[22rem] max-w-[92vw] border-l border-zinc-700 bg-zinc-950/95 p-4 pt-24 shadow-2xl" dir="rtl">
+          <div className="mb-3 flex items-center justify-between gap-2">
             <p className="text-sm font-semibold text-zinc-100">
-              נתוני ניתוח ({modeLabel})
+              {selectedAssembly
+                ? "פרטי הרכבה"
+                : selectedPart
+                  ? "פרטי חלק"
+                  : `נתוני מודל (${modeLabel})`}
             </p>
             <Button variant="ghost" onClick={() => setActiveSheet("none")}>
               סגור
             </Button>
           </div>
 
-          <div className="mb-3 text-xs text-zinc-300">
-            הרכבות: {filteredAssemblies.length} | חלקים: {filteredParts.length}
-          </div>
+          {!selectedAssembly && !selectedPart && (
+            <div className="mb-3 text-xs text-zinc-400">
+              הרכבות: {filteredAssemblies.length} · חלקים: {filteredParts.length}
+            </div>
+          )}
 
-          <div className="max-h-[calc(100vh-11rem)] overflow-auto rounded-xl border border-zinc-800">
-            {selectionMode === "assembly" && (
+          <div className="max-h-[calc(100vh-11rem)] overflow-auto rounded-xl border border-zinc-800 bg-zinc-950/30 p-2">
+            {selectedAssembly ? (
+              <AssemblyPickDetailPanel
+                assembly={selectedAssembly}
+                onSelectPartInstances={(instances) => void selectPartInstances(instances)}
+                onBackToList={() => void selectAssembly(null)}
+              />
+            ) : selectedPart ? (
+              <PartPickDetailPanel entity={selectedPart} onBackToList={() => void selectPart(null)} />
+            ) : selectionMode === "assembly" ? (
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-zinc-900 text-zinc-300">
+                <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
                   <tr>
-                    <th className="p-2 text-right">Assembly</th>
-                    <th className="p-2 text-right">שם</th>
-                    <th className="p-2 text-right">חלקים</th>
-                    <th className="p-2 text-right">משקל</th>
+                    <th className="p-2 text-right font-medium">מספר הרכבה</th>
+                    <th className="p-2 text-right font-medium">שם</th>
+                    <th className="p-2 text-right font-medium">חלקים</th>
+                    <th className="p-2 text-right font-medium">משקל (ק״ג)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(selectedAssembly ? [selectedAssembly] : filteredAssemblies).map((a) => (
+                  {filteredAssemblies.map((a) => (
                     <tr
                       key={a.id}
                       onClick={() => selectAssembly(a)}
-                      className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-800 ${
-                        selectedAssembly?.id === a.id ? "bg-zinc-800" : ""
-                      }`}
+                      className="cursor-pointer border-t border-zinc-800 hover:bg-zinc-800/90"
                     >
-                      <td className="p-2">{a.assemblyMark || "-"}</td>
-                      <td className="p-2">{a.name || "-"}</td>
-                      <td className="p-2">{a.parts.length}</td>
-                      <td className="p-2">{a.weightKg ?? "-"}</td>
+                      <td className="p-2 font-medium text-zinc-100">{a.assemblyMark || "—"}</td>
+                      <td className="p-2 text-zinc-300">{a.name || "—"}</td>
+                      <td className="p-2 text-zinc-300">{a.parts.length}</td>
+                      <td className="p-2 whitespace-nowrap text-zinc-300">
+                        <span dir="ltr">{formatKgPlain(a.weightKg)}</span>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            )}
-
-            {selectionMode === "part" && (
+            ) : (
               <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-zinc-900 text-zinc-300">
+                <thead className="sticky top-0 bg-zinc-900 text-zinc-400">
                   <tr>
-                    <th className="p-2 text-right">Part</th>
-                    <th className="p-2 text-right">סוג</th>
-                    <th className="p-2 text-right">Profile</th>
-                    <th className="p-2 text-right">חומר</th>
+                    <th className="p-2 text-right font-medium">מספר חלק</th>
+                    <th className="p-2 text-right font-medium">שם</th>
+                    <th className="p-2 text-right font-medium">פרופיל</th>
+                    <th className="p-2 text-right font-medium">משקל (ק״ג)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(selectedPart ? [selectedPart] : filteredParts).map((p) => (
+                  {filteredParts.map((p) => (
                     <tr
                       key={p.id}
                       onClick={() => selectPart(p)}
-                      className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-800 ${
-                        selectedPart?.id === p.id ? "bg-zinc-800" : ""
-                      }`}
+                      className="cursor-pointer border-t border-zinc-800 hover:bg-zinc-800/90"
                     >
-                      <td className="p-2">{p.tag || p.name || "-"}</td>
-                      <td className="p-2">{p.ifcType}</td>
-                      <td className="p-2">{p.profile || "-"}</td>
-                      <td className="p-2">{p.material || "-"}</td>
+                      <td className="p-2 font-medium text-zinc-100">{displayPartMark(p)}</td>
+                      <td className="p-2 text-zinc-300">{p.name || p.ifcType || "—"}</td>
+                      <td className="p-2 text-zinc-300">{p.profile || "—"}</td>
+                      <td className="p-2 whitespace-nowrap text-zinc-300">
+                        <span dir="ltr">{formatKgPlain(p.weightKg)}</span>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
           </div>
-
-          {selectedPart && (
-            <div className="mt-3 space-y-1 rounded-xl border border-zinc-800 bg-zinc-900 p-3 text-xs text-zinc-300">
-              <p>אורך: {selectedPart.lengthMm ?? "-"}</p>
-              <p>משקל: {selectedPart.weightKg ?? "-"}</p>
-              <p>X: {selectedPart.xDim ?? "-"}</p>
-              <p>Y: {selectedPart.yDim ?? "-"}</p>
-              <p>עובי: {selectedPart.thickness ?? "-"}</p>
-            </div>
-          )}
         </aside>
       )}
     </main>

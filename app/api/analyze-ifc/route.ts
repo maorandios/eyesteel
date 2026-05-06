@@ -56,15 +56,23 @@ async function runAnalyzer(ifcPath: string, cwd: string): Promise<unknown> {
 
 function runProcess(command: string, args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(command, args, { cwd });
+    // Windows: Python defaults to a legacy ANSI encoding on pipes; JSON must be UTF-8 or Ø etc. become U+FFFD.
+    const proc = spawn(command, args, {
+      cwd,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+      },
+    });
     let stdout = "";
     let stderr = "";
 
     proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      stdout += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
     });
     proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderr += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
     });
     proc.on("error", reject);
     proc.on("close", (code) => {

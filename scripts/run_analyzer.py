@@ -12,7 +12,22 @@ if str(ROOT_DIR) not in sys.path:
 from analyzer import extract_model_data
 
 
+def _ensure_utf8_stdio() -> None:
+    """Avoid mojibake on Windows when piping JSON with Ø, ×, Hebrew, etc."""
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+
 def main() -> None:
+    _ensure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Run eyesteel IFC analyzer")
     parser.add_argument("ifc_file", type=str, help="Path to IFC file")
     parser.add_argument("--debug", action="store_true", help="Enable debug extraction output")

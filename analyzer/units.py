@@ -121,7 +121,9 @@ def _to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
-        cleaned = value.strip().replace(",", "")
+        cleaned = value.strip().replace(",", "").replace("\u202f", "").replace("\xa0", "")
+        if cleaned.startswith("+"):
+            cleaned = cleaned[1:]
         if not cleaned:
             return None
         try:
@@ -132,3 +134,18 @@ def _to_float(value: Any) -> float | None:
     if wrapped is not None:
         return _to_float(wrapped)
     return None
+
+
+def elevation_raw_to_mm(raw: Any, converter: UnitConverter) -> float | None:
+    """Tekla often writes assembly elevations as plain mm; small numbers are usually metres in IFC."""
+    number = _to_float(raw)
+    if number is None:
+        return None
+    if abs(number) >= 1000:
+        return float(number)
+    return converter.to_mm(number)
+
+
+def length_quantity_raw_to_mm(raw: Any, converter: UnitConverter) -> float | None:
+    """Bolt lengths / diameters: same mm-vs-metres heuristic as elevations."""
+    return elevation_raw_to_mm(raw, converter)

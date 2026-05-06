@@ -49,6 +49,8 @@ export interface AnalyzerPart {
   ifcType: string;
   name: string | null;
   tag: string | null;
+  /** Resolved human-readable mark (Tekla / IFC), avoids GUID-like Tags */
+  partMark?: string | null;
   profile: string | null;
   material: string | null;
   lengthMm: number | null;
@@ -56,6 +58,29 @@ export interface AnalyzerPart {
   xDim: number | null;
   yDim: number | null;
   thickness: number | null;
+  /** Tekla Quantity / IFC when present */
+  quantity?: number | null;
+}
+
+/** Flattened bolt / mechanical fastener row from Tekla Bolt Pset */
+export interface AnalyzerBoltRow {
+  id: string;
+  expressId: number | null;
+  ifcType: string;
+  name: string | null;
+  tag: string | null;
+  boltName: string | null;
+  boltLengthMm: number | null;
+  boltStandard: string | null;
+  boltHoleDiameterMm: number | null;
+  /** Pieces represented by this IFC entity (e.g. bolt group quantity) */
+  boltQty: number | null;
+}
+
+export type AnalyzerIndexedEntity = AnalyzerPart | AnalyzerBoltRow;
+
+export function isAnalyzerBoltRow(e: AnalyzerIndexedEntity): e is AnalyzerBoltRow {
+  return typeof e === "object" && e !== null && "boltQty" in e;
 }
 
 export interface AnalyzerAssembly {
@@ -69,10 +94,12 @@ export interface AnalyzerAssembly {
   weightKg: number | null;
   bottomElevation: number | null;
   topElevation: number | null;
+  /** Steel parts only (fasteners excluded) */
   parts: AnalyzerPart[];
+  bolts?: AnalyzerBoltRow[];
 }
 
 export interface AnalyzerOutput {
   assemblies: AnalyzerAssembly[];
-  parts: AnalyzerPart[];
+  parts: AnalyzerIndexedEntity[];
 }
