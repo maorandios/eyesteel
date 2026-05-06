@@ -42,3 +42,37 @@ export interface Assembly {
   partCount: number;
   parts: Part[];
 }
+
+export interface AnalyzerPart {
+  id: string;
+  expressId: number | null;
+  ifcType: string;
+  name: string | null;
+  tag: string | null;
+  profile: string | null;
+  material: string | null;
+  lengthMm: number | null;
+  weightKg: number | null;
+  xDim: number | null;
+  yDim: number | null;
+  thickness: number | null;
+}
+
+export interface AnalyzerAssembly {
+  id: string;
+  expressId: number | null;
+  ifcType: "IfcElementAssembly";
+  name: string | null;
+  tag: string | null;
+  assemblyMark: string | null;
+  positionCode: string | null;
+  weightKg: number | null;
+  bottomElevation: number | null;
+  topElevation: number | null;
+  parts: AnalyzerPart[];
+}
+
+export interface AnalyzerOutput {
+  assemblies: AnalyzerAssembly[];
+  parts: AnalyzerPart[];
+}

@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import type { Element, ViewerMode } from "@/types/domain";
+import type { AnalyzerOutput, Element, ViewerMode } from "@/types/domain";
 
 interface AppState {
   file: File | null;
@@ -13,7 +13,9 @@ interface AppState {
   activeSheet: "none" | "search" | "layers" | "details" | "parts";
   categoryVisibility: Record<string, boolean>;
   transparencyEnabled: boolean;
+  analyzerData: AnalyzerOutput | null;
   setFile: (file: File | null) => void;
+  setAnalyzerData: (data: AnalyzerOutput | null) => void;
   setLoadingState: (state: AppState["loadingState"]) => void;
   setMode: (mode: ViewerMode) => void;
   setSelectedElement: (element: Element | null) => void;
@@ -40,12 +42,14 @@ export const useAppStore = create<AppState>((set) => ({
     other: true,
   },
   transparencyEnabled: false,
+  analyzerData: null,
   setFile: (file) =>
     set({
       file,
       fileName: file?.name ?? "",
       loadingState: file ? "loading" : "idle",
     }),
+  setAnalyzerData: (analyzerData) => set({ analyzerData }),
   setLoadingState: (loadingState) => set({ loadingState }),
   setMode: (mode) => set({ mode }),
   setSelectedElement: (selectedElement) => set({ selectedElement }),
