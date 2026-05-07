@@ -1,6 +1,7 @@
 import * as OBC from "@thatopen/components";
 import type { MaterialDefinition } from "@thatopen/fragments";
-import * as THREE from "three";
+
+import { SELECTION_HIGHLIGHT_COLOR } from "@/lib/viewer/visual-policy";
 
 export async function highlightExpressIds(
   components: OBC.Components,
@@ -9,7 +10,7 @@ export async function highlightExpressIds(
 ) {
   const fragments = components.get(OBC.FragmentsManager);
   const selectionMaterial: MaterialDefinition = {
-    color: new THREE.Color("#f59e0b"),
+    color: SELECTION_HIGHLIGHT_COLOR.clone(),
     opacity: 1,
     transparent: false,
     renderedFaces: 0,

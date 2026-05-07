@@ -2,8 +2,15 @@
 
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
+import { LodMode } from "@thatopen/fragments";
 import type { ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
+import {
+  SELECTION_HIGHLIGHT_COLOR,
+  applyEyeSteelRendererDefaults,
+  applyEyeSteelSceneBackdrop,
+  createEyeSteelLights,
+} from "@/lib/viewer/visual-policy";
 
 interface PickHit {
   localId: number;
@@ -14,15 +21,16 @@ export class ViewerEngine {
   private readonly container: HTMLDivElement;
   private readonly components: OBC.Components;
   private world!: OBC.World;
-  private animationHandle = 0;
   private modelObject: THREE.Object3D | null = null;
   private modelId: string | null = null;
   private disposed = false;
+  private readonly viewerLights: THREE.Light[] = [];
 
   private pointerDownHandler: ((event: PointerEvent) => void) | null = null;
   private pointerUpHandler: ((event: PointerEvent) => void) | null = null;
   private downPos: { x: number; y: number; t: number } | null = null;
   private pickCallback: ((hit: PickHit) => void) | null = null;
+  private fragmentCameraHooksInstalled = false;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -39,13 +47,80 @@ export class ViewerEngine {
 
     this.components.init();
     (this.world.scene as OBC.SimpleScene).setup();
-    this.world.camera.controls?.setLookAt(18, 18, 18, 0, 0, 0);
+    this.world.camera.controls?.setLookAt(18, 18, 18, 0, 0, 0, false);
+    this.applySnappyCameraControls();
+    this.applyPerspectiveClipPlanes();
+    this.installFragmentCameraSyncOnce();
 
-    const light = new THREE.HemisphereLight(0xffffff, 0x111827, 0.8);
-    this.world.scene.three.add(light);
+    const scene = this.world.scene.three as THREE.Scene;
+    applyEyeSteelSceneBackdrop(scene);
+    this.viewerLights.push(...createEyeSteelLights(scene));
+
+    const renderer = this.world.renderer as OBC.SimpleRenderer;
+    applyEyeSteelRendererDefaults(renderer.three);
+    renderer.onResize.add(() => applyEyeSteelRendererDefaults(renderer.three));
 
     this.installPointerListeners();
-    this.animate();
+  }
+
+  /**
+   * {@link OBC.SimpleCamera} defaults to PerspectiveCamera(…, near=1, far=1000), which clips mesh
+   * when dollying in close. Pull `near` in and extend `far` so zoom never slices steel.
+   */
+  private applyPerspectiveClipPlanes(modelRoot?: THREE.Object3D) {
+    const cam = this.world.camera.three;
+    if (!cam || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) return;
+    const persp = cam as THREE.PerspectiveCamera;
+    persp.near = 0.01;
+    if (modelRoot) {
+      const box = new THREE.Box3().setFromObject(modelRoot);
+      const span = box.getSize(new THREE.Vector3()).length();
+      persp.far = Math.max(5e4, span * 100, 1e6);
+    } else {
+      persp.far = 1e6;
+    }
+    persp.updateProjectionMatrix();
+  }
+
+  /** Library sets smoothTime=0.2 on CameraControls — feels sluggish while orbiting. */
+  private applySnappyCameraControls() {
+    const c = this.world.camera.controls;
+    if (!c) return;
+    c.smoothTime = 0;
+    c.draggingSmoothTime = 0;
+  }
+
+  private installFragmentCameraSyncOnce() {
+    if (this.fragmentCameraHooksInstalled) return;
+    const cameraComp = this.world.camera as OBC.SimpleCamera;
+    cameraComp.controls?.addEventListener("rest", () => {
+      const fragments = this.components.get(OBC.FragmentsManager);
+      if (!fragments.initialized) return;
+      void fragments.core.update(true);
+    });
+    cameraComp.controls?.addEventListener("update", () => {
+      const fragments = this.components.get(OBC.FragmentsManager);
+      if (!fragments.initialized) return;
+      void fragments.core.update();
+    });
+    this.fragmentCameraHooksInstalled = true;
+  }
+
+  /**
+   * One-time readability pass on Three materials (fragments often ship MeshStandardMaterial clones).
+   * Low metalness / mid roughness = softer industrial highlights without env maps.
+   */
+  private tuneReadableSteelMaterials(root: THREE.Object3D) {
+    root.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of mats) {
+        if (!(mat instanceof THREE.MeshStandardMaterial)) continue;
+        mat.metalness = Math.min(mat.metalness, 0.08);
+        mat.roughness = THREE.MathUtils.clamp(mat.roughness + 0.1, 0.66, 0.85);
+      }
+    });
   }
 
   async loadFile(file: File) {
@@ -61,9 +136,6 @@ export class ViewerEngine {
     this.modelId = casted.modelId;
     this.world.scene.three.add(casted.object);
 
-    // Critical: the model's worker-side raycaster only loads tiles when a
-    // camera is registered. Without this, fragments.raycast(...) always
-    // returns null even though the geometry renders correctly.
     const cam = this.world.camera.three;
     if (cam && (cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
       casted.useCamera(cam as THREE.PerspectiveCamera);
@@ -71,16 +143,15 @@ export class ViewerEngine {
       casted.useCamera(cam as THREE.OrthographicCamera);
     }
 
-    // Drive worker→main mesh updates each frame so tiles refresh with the camera.
     const fragments = this.components.get(OBC.FragmentsManager);
-    const cameraComp = this.world.camera as OBC.SimpleCamera;
-    cameraComp.controls?.addEventListener("rest", () => {
-      void fragments.core.update(true);
-    });
-    cameraComp.controls?.addEventListener("update", () => {
-      void fragments.core.update();
-    });
     void fragments.core.update(true);
+
+    const fragModel = fragments.list.get(casted.modelId);
+    if (fragModel) await fragModel.setLodMode(LodMode.ALL_VISIBLE);
+
+    this.applyPerspectiveClipPlanes(casted.object);
+
+    this.tuneReadableSteelMaterials(casted.object);
 
     this.fitAll();
   }
@@ -100,12 +171,6 @@ export class ViewerEngine {
     this.pointerDownHandler = (event: PointerEvent) => {
       if (event.button !== 0 && event.pointerType === "mouse") return;
       this.downPos = { x: event.clientX, y: event.clientY, t: Date.now() };
-      console.log("[picker] down", {
-        x: event.clientX,
-        y: event.clientY,
-        target: (event.target as Element | null)?.tagName ?? null,
-        type: event.pointerType,
-      });
     };
 
     this.pointerUpHandler = async (event: PointerEvent) => {
@@ -118,20 +183,7 @@ export class ViewerEngine {
 
       const distSq = dx * dx + dy * dy;
       const isTap = distSq <= 144 && dt <= 700;
-      console.log("[picker] up", {
-        x: event.clientX,
-        y: event.clientY,
-        dx,
-        dy,
-        dt,
-        isTap,
-        target: (event.target as Element | null)?.tagName ?? null,
-      });
       if (!isTap) return;
-      if (!this.pickCallback) {
-        console.log("[picker] skipped (no callback)");
-        return;
-      }
 
       const renderer = this.world.renderer;
       const camera = this.world.camera;
@@ -140,6 +192,9 @@ export class ViewerEngine {
       if (rect.width === 0 || rect.height === 0) return;
       const useX = event.clientX || start.x;
       const useY = event.clientY || start.y;
+
+      if (!this.pickCallback) return;
+
       const mouse = new THREE.Vector2(
         ((useX - rect.left) / rect.width) * 2 - 1,
         -((useY - rect.top) / rect.height) * 2 + 1,
@@ -157,7 +212,6 @@ export class ViewerEngine {
         return;
       }
 
-      console.log("[picker] gpu pick", hit);
       if (!hit) return;
       try {
         this.pickCallback(hit);
@@ -166,15 +220,13 @@ export class ViewerEngine {
       }
     };
 
-    // Listen on canvas (capture phase) AND on window so we never miss the
-    // pointerup even if camera-controls captures the pointer mid-gesture.
     canvas.addEventListener("pointerdown", this.pointerDownHandler, true);
     canvas.addEventListener("pointerup", this.pointerUpHandler, true);
     window.addEventListener("pointerup", this.pointerUpHandler, true);
   }
 
   private removePointerListeners() {
-    const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
+    const canvas = this.world.renderer?.three.domElement as HTMLCanvasElement | undefined;
     if (this.pointerDownHandler) {
       canvas?.removeEventListener("pointerdown", this.pointerDownHandler, true);
     }
@@ -191,22 +243,36 @@ export class ViewerEngine {
   async highlightItemIds(itemIds: number[]) {
     if (!this.modelId) return;
     const fragments = this.components.get(OBC.FragmentsManager);
+    const fragModel = fragments.list.get(this.modelId);
+
     await fragments.resetHighlight();
-    if (itemIds.length === 0) return;
+    if (fragModel) await fragModel.resetOpacity(undefined);
+
+    if (itemIds.length === 0) {
+      void fragments.core.update(true);
+      return;
+    }
+
     await fragments.highlight(
       {
-        color: new THREE.Color("#fbbf24"),
+        color: SELECTION_HIGHLIGHT_COLOR.clone(),
         opacity: 1,
         transparent: false,
         renderedFaces: 0,
       },
       { [this.modelId]: new Set(itemIds) },
     );
+    void fragments.core.update(true);
   }
 
   async clearHighlight() {
     const fragments = this.components.get(OBC.FragmentsManager);
     await fragments.resetHighlight();
+    if (this.modelId) {
+      const fragModel = fragments.list.get(this.modelId);
+      if (fragModel) await fragModel.resetOpacity(undefined);
+    }
+    void fragments.core.update(true);
   }
 
   async focusItemIds(itemIds: number[]) {
@@ -227,7 +293,7 @@ export class ViewerEngine {
         center.x,
         center.y,
         center.z,
-        true,
+        false,
       );
     } catch (error) {
       console.error("Focus failed:", error);
@@ -248,7 +314,7 @@ export class ViewerEngine {
   setTransparency(enabled: boolean) {
     if (this.disposed) return;
     if (!this.modelObject) return;
-    this.modelObject.traverse((child) => {
+    this.modelObject.traverse((child: THREE.Object3D) => {
       const mesh = child as THREE.Mesh;
       const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
       if (!material) return;
@@ -264,22 +330,27 @@ export class ViewerEngine {
 
   resetView() {
     if (this.disposed) return;
-    this.world.camera.controls?.setLookAt(18, 18, 18, 0, 0, 0, true);
+    this.world.camera.controls?.setLookAt(18, 18, 18, 0, 0, 0, false);
   }
 
   fitAll() {
     if (this.disposed) return;
     if (!this.modelObject) return;
+    this.applyPerspectiveClipPlanes(this.modelObject);
     const box = new THREE.Box3().setFromObject(this.modelObject);
     const center = box.getCenter(new THREE.Vector3());
-    this.world.camera.controls?.setTarget(center.x, center.y, center.z, true);
+    this.world.camera.controls?.setTarget(center.x, center.y, center.z, false);
   }
 
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    cancelAnimationFrame(this.animationHandle);
     try {
+      for (const light of this.viewerLights) {
+        this.world.scene.three.remove(light);
+        light.dispose();
+      }
+      this.viewerLights.length = 0;
       if (this.modelObject) {
         this.world.scene.three.remove(this.modelObject);
         this.modelObject = null;
@@ -291,8 +362,4 @@ export class ViewerEngine {
       // Guard against teardown edge-cases in React strict-mode remounts.
     }
   }
-
-  private animate = () => {
-    this.animationHandle = requestAnimationFrame(this.animate);
-  };
 }

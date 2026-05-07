@@ -412,7 +412,11 @@ export default function ViewerPage() {
       </BottomSheet>
 
       {showDataPanel && (
-        <aside className="absolute right-0 top-0 z-30 h-full w-[22rem] max-w-[92vw] border-l border-zinc-700 bg-zinc-950/95 p-4 pt-24 shadow-2xl" dir="rtl">
+        <div className="pointer-events-none absolute inset-0 z-30 flex justify-end">
+          <aside
+            className="pointer-events-auto flex h-full w-[22rem] max-w-[92vw] shrink-0 flex-col border-l border-zinc-700 bg-zinc-950/95 p-4 pt-24 shadow-2xl"
+            dir="rtl"
+          >
           <div className="mb-3 flex items-center justify-between gap-2">
             <p className="text-sm font-semibold text-zinc-100">
               {selectedAssembly
@@ -639,6 +643,7 @@ export default function ViewerPage() {
             )}
           </div>
         </aside>
+        </div>
       )}
     </main>
   );
