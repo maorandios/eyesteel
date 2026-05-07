@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 
-export type ViewerToolId = "none" | "measurement";
+export type ViewerToolId = "none" | "measurement" | "free_section_pick";
 
 interface ViewerToolState {
   activeTool: ViewerToolId;

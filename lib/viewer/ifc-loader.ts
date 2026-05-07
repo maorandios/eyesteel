@@ -11,6 +11,11 @@ export async function loadIfcModel(
   const fragments = components.get(OBC.FragmentsManager);
   if (!fragments.initialized) {
     fragments.init(await OBC.FragmentsManager.getWorker());
+    /**
+     * Default maxUpdateRate (100 ms) drops {@link FRAGS.FragmentsModels.update} calls while the
+     * camera is idle — Clipper/slider plane edits then never reach the worker (cuts look broken).
+     */
+    fragments.core.settings.maxUpdateRate = 0;
   }
 
   const ifcLoader = components.get(OBC.IfcLoader);

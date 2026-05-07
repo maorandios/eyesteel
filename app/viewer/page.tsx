@@ -6,12 +6,14 @@ import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { CompactModeNav } from "@/components/viewer/CompactModeNav";
 import { SmartMeasurementCard } from "@/components/viewer/SmartMeasurementCard";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
+import { ViewSectionControls } from "@/components/viewer/ViewSectionControls";
 import { Button } from "@/components/ui/button";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
 import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
 import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
+import type { ViewSectionPresetId } from "@/lib/viewer/view-section-presets";
 import { he } from "@/lib/i18n/he";
 import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
 import { isAnalyzerBoltRow } from "@/types/domain";
@@ -122,6 +124,19 @@ export default function ViewerPage() {
   const finishMeasurementTool = useCallback(() => {
     setViewerTool("none");
   }, [setViewerTool]);
+
+  const handleViewPreset = useCallback(
+    (preset: ViewSectionPresetId) => {
+      engine?.applyViewPreset(preset);
+      setViewerTool("none");
+    },
+    [engine, setViewerTool],
+  );
+
+  const handleBeginFreeSection = useCallback(() => {
+    engine?.beginFreeSectionPick();
+    setViewerTool("free_section_pick");
+  }, [engine, setViewerTool]);
 
   const filteredAssemblies = useMemo(() => {
     const list = analyzerData?.assemblies ?? [];
@@ -404,7 +419,11 @@ export default function ViewerPage() {
         onMeasurementToggle={toggleMeasurementTool}
         onMeasurementClear={() => engine?.clearMeasurements()}
         onMeasurementFinish={finishMeasurementTool}
+        onViewPreset={handleViewPreset}
+        onBeginFreeSection={handleBeginFreeSection}
       />
+
+      <ViewSectionControls engine={engine} />
 
       {viewerTool === "measurement" && <SmartMeasurementCard />}
 

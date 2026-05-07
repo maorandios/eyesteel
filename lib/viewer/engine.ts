@@ -7,7 +7,10 @@ import CameraControls from "camera-controls";
 import { LodMode } from "@thatopen/fragments";
 import type { ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
+import { useViewSectionStore } from "@/lib/state/view-section-store";
 import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
+import { ViewSectionController } from "@/lib/viewer/view-section-controller";
+import type { ViewSectionPresetId } from "@/lib/viewer/view-section-presets";
 import {
   SELECTION_HIGHLIGHT_COLOR,
   applyEyeSteelRendererDefaults,
@@ -20,7 +23,7 @@ interface PickHit {
   itemId: number;
 }
 
-export type ViewerToolMode = "none" | "measurement";
+export type ViewerToolMode = "none" | "measurement" | "free_section_pick";
 
 /** Tap classification — fingers jitter more than mouse cursors. */
 const TAP_SLOP_SQ_MOUSE = 144;
@@ -47,7 +50,10 @@ export class ViewerEngine {
   private downPos: { x: number; y: number; t: number; pointerType: string } | null = null;
   private pickCallback: ((hit: PickHit) => void) | null = null;
   private fragmentCameraHooksInstalled = false;
+  /** `FragmentsManager.list` is only valid after {@link OBC.FragmentsManager.init}. */
+  private fragmentsClippingListenersInstalled = false;
   private readonly measurementController: MeasurementController;
+  private readonly viewSectionController: ViewSectionController;
   private viewerTool: ViewerToolMode = "none";
   /** Restore after measurement — only used when we disable orbit on touch (see measurementSuppressedControls). */
   private measurementControlsEnabledSnapshot = true;
@@ -60,6 +66,7 @@ export class ViewerEngine {
     this.container = container;
     this.components = new OBC.Components();
     this.measurementController = new MeasurementController(this.components);
+    this.viewSectionController = new ViewSectionController(this.components);
     this.setupWorld();
   }
 
@@ -75,13 +82,19 @@ export class ViewerEngine {
 
     this.components.init();
     (this.world.scene as OBC.SimpleScene).setup();
-    this.world.camera.controls?.setLookAt(18, 18, 18, 0, 0, 0, false);
+    const sceneRoot = this.world.scene.three as THREE.Scene;
+    sceneRoot.up.set(0, 1, 0);
+    const camThree = this.world.camera.three as THREE.PerspectiveCamera;
+    camThree.up.copy(sceneRoot.up);
+    this.world.camera.controls?.updateCameraUp();
+    this.world.camera.controls?.setLookAt(14, 14, 14, 0, 0, 0, false);
     this.applySnappyCameraControls();
     this.applyPerspectiveClipPlanes();
     this.installFragmentCameraSyncOnce();
     this.installOrbitPivotOnRotateStart();
 
     this.measurementController.attach(this.world);
+    this.viewSectionController.attach(this.world);
 
     const scene = this.world.scene.three as THREE.Scene;
     applyEyeSteelSceneBackdrop(scene);
@@ -99,6 +112,13 @@ export class ViewerEngine {
     renderer.onResize.add(() => {
       applyEyeSteelRendererDefaults(renderer.three);
       syncCss2dOverlay();
+    });
+
+    renderer.onClippingPlanesUpdated.add(() => {
+      if (this.disposed) return;
+      const fm = this.components.get(OBC.FragmentsManager);
+      if (!fm.initialized) return;
+      void fm.core.update(true);
     });
 
     renderer.onBeforeUpdate.add(() => {
@@ -176,6 +196,44 @@ export class ViewerEngine {
     controls.addEventListener("controlstart", onRotateStart);
   }
 
+  /**
+   * Fragments clip in the worker using planes from each loaded model's `getClippingPlanesEvent`.
+   * Default is `() => []` — without wiring, Clipper planes never reach the fragment renderer (slider / cuts appear broken).
+   * Must run only after `FragmentsManager.init()` (inside {@link loadIfcModel}); `fragments.list` throws earlier.
+   */
+  private ensureFragmentsClippingListeners() {
+    const fragments = this.components.get(OBC.FragmentsManager);
+    if (!fragments.initialized || this.fragmentsClippingListenersInstalled || this.disposed) return;
+    fragments.list.onItemSet.add(() => {
+      if (!this.disposed) this.syncFragmentsClippingPlanesBridge();
+    });
+    this.fragmentsClippingListenersInstalled = true;
+  }
+
+  private syncFragmentsClippingPlanesBridge() {
+    const fragments = this.components.get(OBC.FragmentsManager);
+    if (!fragments.initialized || !this.world?.renderer) return;
+    const getter = () =>
+      (this.world.renderer as unknown as { clippingPlanes: THREE.Plane[] }).clippingPlanes;
+    for (const [, model] of fragments.list) {
+      model.getClippingPlanesEvent = getter;
+    }
+  }
+
+  /** Camera along `(1,1,1)` diagonal — Y‑up matches fragment IFC placement (RX −90° → vertical along +Y). */
+  private frameCameraIsoDiagonal(center: THREE.Vector3, radius: number) {
+    const ctrl = this.world.camera.controls;
+    const cam = this.world.camera.three as THREE.PerspectiveCamera;
+    this.world.scene.three.up.set(0, 1, 0);
+    cam.up.set(0, 1, 0);
+    ctrl?.updateCameraUp();
+    const dist = Math.max(radius * 1.55, 8);
+    const dir = new THREE.Vector3(1, 1, 1).normalize();
+    const eye = center.clone().addScaledVector(dir, dist);
+    ctrl?.setOrbitPoint(center.x, center.y, center.z);
+    ctrl?.setLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, false);
+  }
+
   private installFragmentCameraSyncOnce() {
     if (this.fragmentCameraHooksInstalled) return;
     const cameraComp = this.world.camera as OBC.SimpleCamera;
@@ -212,7 +270,9 @@ export class ViewerEngine {
   async loadFile(file: File) {
     if (this.disposed) return;
     this.measurementController.clearAll();
+    this.viewSectionController.clearForNewModel();
     const { model } = await loadIfcModel(this.components, file);
+    this.ensureFragmentsClippingListeners();
     const casted = model as {
       modelId: string;
       object: THREE.Object3D;
@@ -240,6 +300,7 @@ export class ViewerEngine {
 
     this.tuneReadableSteelMaterials(casted.object);
 
+    this.syncFragmentsClippingPlanesBridge();
     this.fitAll();
   }
 
@@ -321,13 +382,14 @@ export class ViewerEngine {
     if (host) host.style.touchAction = "none";
   }
 
-  /** Measurement on touch: orbit off so gestures don't fight taps. Desktop: keep orbiting (CameraControls stay enabled). */
+  /** Measurement / free-section pick on touch: orbit off so gestures don't fight taps. Desktop: keep orbiting when allowed. */
   setViewerTool(tool: ViewerToolMode) {
     if (this.disposed) return;
     this.viewerTool = tool;
     const ctrl = this.world.camera.controls;
 
     if (tool === "measurement") {
+      this.viewSectionController.abortFreePick();
       if (ctrl && MeasurementController.prefersTouchLikeMeasurement()) {
         this.measurementControlsEnabledSnapshot = ctrl.enabled;
         ctrl.enabled = false;
@@ -335,6 +397,14 @@ export class ViewerEngine {
       }
       this.reinstateCanvasTouchBlocking();
       this.measurementController.activate();
+    } else if (tool === "free_section_pick") {
+      this.measurementController.deactivate();
+      if (ctrl && MeasurementController.prefersTouchLikeMeasurement()) {
+        this.measurementControlsEnabledSnapshot = ctrl.enabled;
+        ctrl.enabled = false;
+        this.measurementSuppressedControls = true;
+      }
+      this.reinstateCanvasTouchBlocking();
     } else {
       this.measurementController.deactivate();
       if (ctrl && this.measurementSuppressedControls) {
@@ -353,6 +423,36 @@ export class ViewerEngine {
     this.measurementController.clearAll();
   }
 
+  applyViewPreset(preset: ViewSectionPresetId) {
+    if (this.disposed || !this.modelObject) return;
+    this.viewSectionController.applyPreset(preset, this.modelObject);
+  }
+
+  beginFreeSectionPick() {
+    if (this.disposed || !this.modelObject) return;
+    this.viewSectionController.beginFreePick(this.modelObject);
+  }
+
+  abortFreeSectionPick() {
+    if (this.disposed) return;
+    this.viewSectionController.abortFreePick();
+  }
+
+  cancelViewSection() {
+    if (this.disposed) return;
+    this.viewSectionController.cancelSection();
+  }
+
+  setViewSectionDepth(offset: number) {
+    if (this.disposed) return;
+    this.viewSectionController.setDepthOffset(offset);
+  }
+
+  flipViewSection() {
+    if (this.disposed) return;
+    this.viewSectionController.flip();
+  }
+
   /** Measurement taps on touch/pencil — commit on pointerdown so we don't rely on pointerup (often broken / paired incorrectly on mobile). */
   private commitMeasurementTap(canvas: HTMLCanvasElement, clientX: number, clientY: number, pe: PointerEvent) {
     // Only suppress synthetic mouse after real touch/pen — compact viewport uses real mouse in DevTools;
@@ -367,6 +467,27 @@ export class ViewerEngine {
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
     void this.measurementController.tapCommit(ndc);
+  }
+
+  private async commitFreeSectionTap(
+    canvas: HTMLCanvasElement,
+    clientX: number,
+    clientY: number,
+    pe: PointerEvent,
+  ) {
+    if (pe.pointerType === "touch" || pe.pointerType === "pen") {
+      this.suppressPrimaryMouseDownUntilMs = Date.now() + 450;
+    }
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    await this.viewSectionController.tryPick(ndc);
+    if (useViewSectionStore.getState().freePickStep === "active") {
+      this.setViewerTool("none");
+    }
   }
 
   private installPointerListeners() {
@@ -396,14 +517,19 @@ export class ViewerEngine {
     };
 
     this.hostMeasurePointerDownCapture = (event: PointerEvent) => {
-      if (this.disposed || this.viewerTool !== "measurement") return;
+      if (this.disposed) return;
+      if (this.viewerTool !== "measurement" && this.viewerTool !== "free_section_pick") return;
       if (!this.shouldInstantMeasurementTap(event)) return;
       const { clientX: x, clientY: y } = event;
       const rect = canvas.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
       if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return;
       syncNdcFromClient(x, y);
-      this.commitMeasurementTap(canvas, x, y, event);
+      if (this.viewerTool === "measurement") {
+        this.commitMeasurementTap(canvas, x, y, event);
+      } else {
+        void this.commitFreeSectionTap(canvas, x, y, event);
+      }
     };
     this.container.addEventListener("pointerdown", this.hostMeasurePointerDownCapture, true);
 
@@ -431,9 +557,9 @@ export class ViewerEngine {
         return;
       }
 
-      /* Instant measurement is handled on container capture (see hostMeasurePointerDownCapture). */
+      /* Instant measurement / free-section picks use container capture (see hostMeasurePointerDownCapture). */
       if (
-        this.viewerTool === "measurement" &&
+        (this.viewerTool === "measurement" || this.viewerTool === "free_section_pick") &&
         this.shouldInstantMeasurementTap(event)
       ) {
         return;
@@ -478,6 +604,11 @@ export class ViewerEngine {
 
       if (this.viewerTool === "measurement") {
         this.commitMeasurementTap(canvas, useX, useY, event);
+        return;
+      }
+
+      if (this.viewerTool === "free_section_pick") {
+        await this.commitFreeSectionTap(canvas, useX, useY, event);
         return;
       }
 
@@ -638,7 +769,17 @@ export class ViewerEngine {
 
   resetView() {
     if (this.disposed) return;
-    this.world.camera.controls?.setLookAt(18, 18, 18, 0, 0, 0, false);
+    if (this.modelObject) {
+      const box = new THREE.Box3().setFromObject(this.modelObject);
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      this.frameCameraIsoDiagonal(sphere.center, sphere.radius);
+      return;
+    }
+    const cam = this.world.camera.three as THREE.PerspectiveCamera;
+    cam.up.set(0, 1, 0);
+    this.world.scene.three.up.set(0, 1, 0);
+    this.world.camera.controls?.updateCameraUp();
+    this.world.camera.controls?.setLookAt(14, 14, 14, 0, 0, 0, false);
   }
 
   fitAll() {
@@ -646,17 +787,15 @@ export class ViewerEngine {
     if (!this.modelObject) return;
     this.applyPerspectiveClipPlanes(this.modelObject);
     const box = new THREE.Box3().setFromObject(this.modelObject);
-    const center = box.getCenter(new THREE.Vector3());
-    const ctrl = this.world.camera.controls;
-    ctrl?.setOrbitPoint(center.x, center.y, center.z);
-    ctrl?.setTarget(center.x, center.y, center.z, false);
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    this.frameCameraIsoDiagonal(sphere.center, sphere.radius);
   }
 
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
     try {
-      if (this.viewerTool === "measurement") {
+      if (this.viewerTool === "measurement" || this.viewerTool === "free_section_pick") {
         const ctrl = this.world.camera.controls;
         if (ctrl && this.measurementSuppressedControls) {
           ctrl.enabled = this.measurementControlsEnabledSnapshot;
@@ -664,6 +803,7 @@ export class ViewerEngine {
         this.measurementSuppressedControls = false;
       }
       this.viewerTool = "none";
+      this.viewSectionController.dispose();
       this.measurementController.shutdown();
       for (const light of this.viewerLights) {
         this.world.scene.three.remove(light);
