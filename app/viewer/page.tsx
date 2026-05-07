@@ -312,14 +312,20 @@ export default function ViewerPage() {
   );
 
   useEffect(() => {
-    if (!engine || !analyzerData) return;
+    if (!engine) return;
     engine.setPickCallback(async (hit) => {
+      if (!analyzerData) {
+        await engine.highlightItemIds([hit.itemId]);
+        setSelectionStatus(`נבחר פריט IFC ${formatCount(hit.itemId)} (נתוני ניתוח לא זמינים)`);
+        return;
+      }
+
       const part =
         analyzerData.parts.find((p) => p.expressId === hit.itemId) ||
         analyzerData.parts.find((p) => p.expressId === hit.localId);
 
       if (!part) {
-        if (engine) await engine.highlightItemIds([hit.itemId]);
+        await engine.highlightItemIds([hit.itemId]);
         setSelectionStatus(`לא זוהתה התאמה (item:${formatCount(hit.itemId)})`);
         return;
       }

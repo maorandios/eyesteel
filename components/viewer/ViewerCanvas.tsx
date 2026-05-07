@@ -20,5 +20,5 @@ export function ViewerCanvas({ onReady }: Props) {
     };
   }, [onReady]);
 
-  return <div ref={ref} className="h-full w-full" />;
+  return <div ref={ref} className="h-full w-full touch-none" />;
 }

@@ -22,7 +22,7 @@ export function FloatingActions({
   onMeasurementToggle,
 }: Props) {
   return (
-    <div className="absolute bottom-24 left-3 z-20 flex flex-col gap-2">
+    <div className="absolute bottom-36 left-3 z-50 flex flex-col gap-2">
       <Button
         type="button"
         size="lg"

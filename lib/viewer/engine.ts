@@ -22,6 +22,12 @@ interface PickHit {
 
 export type ViewerToolMode = "none" | "measurement";
 
+/** Tap classification — fingers jitter more than mouse cursors. */
+const TAP_SLOP_SQ_MOUSE = 144;
+const TAP_SLOP_SQ_TOUCH = 900;
+const TAP_MAX_MS_MOUSE = 700;
+const TAP_MAX_MS_TOUCH = 950;
+
 export class ViewerEngine {
   private readonly container: HTMLDivElement;
   private readonly components: OBC.Components;
@@ -34,12 +40,21 @@ export class ViewerEngine {
   private pointerDownHandler: ((event: PointerEvent) => void) | null = null;
   private pointerMoveHandler: ((event: PointerEvent) => void) | null = null;
   private pointerUpHandler: ((event: PointerEvent) => void) | null = null;
+  private pointerCancelHandler: ((event: PointerEvent) => void) | null = null;
+  /** Viewer container capture — measurement taps hit here before canvas/CSS layers (mobile-safe). */
+  private hostMeasurePointerDownCapture: ((event: PointerEvent) => void) | null = null;
   private readonly lastPointerNdc = new THREE.Vector2(0, 0);
-  private downPos: { x: number; y: number; t: number } | null = null;
+  private downPos: { x: number; y: number; t: number; pointerType: string } | null = null;
   private pickCallback: ((hit: PickHit) => void) | null = null;
   private fragmentCameraHooksInstalled = false;
   private readonly measurementController: MeasurementController;
   private viewerTool: ViewerToolMode = "none";
+  /** Restore after measurement — only used when we disable orbit on touch (see measurementSuppressedControls). */
+  private measurementControlsEnabledSnapshot = true;
+  /** True only when measurement mode disabled orbit for a coarse-pointer UI; desktop keeps orbiting. */
+  private measurementSuppressedControls = false;
+  /** Browsers often emit synthetic `pointerType: mouse` after touch; ignore briefly so measurement doesn't double-fire. */
+  private suppressPrimaryMouseDownUntilMs = 0;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -95,6 +110,8 @@ export class ViewerEngine {
     });
 
     this.installPointerListeners();
+    /* Ensure the host div (not only the canvas) never scrolls the page instead of delivering gestures. */
+    this.container.style.touchAction = "none";
   }
 
   /**
@@ -234,14 +251,96 @@ export class ViewerEngine {
     this.pickCallback = cb;
   }
 
-  /** Exclusive tool modes: measurement disables IFC element picking on tap. */
+  /**
+   * Viewport looks like phone/tablet or Chrome DevTools device toolbar — still sends `pointerType: "mouse"`.
+   * Without this, measurement waits for pointerup like desktop, which often breaks under emulation.
+   */
+  private compactViewportLikePhoneOrDevTools(): boolean {
+    if (typeof window === "undefined") return false;
+    const iw = window.visualViewport?.width ?? window.innerWidth;
+    const ih = window.visualViewport?.height ?? window.innerHeight;
+    return iw <= 1366 || ih <= 860 || Math.min(iw, ih) <= 900;
+  }
+
+  /** Primary pointer should place a measurement point on pointerdown (not only after pointerup). */
+  private shouldInstantMeasurementTap(e: PointerEvent): boolean {
+    if (!e.isPrimary) return false;
+    if (e.pointerType === "touch" || e.pointerType === "pen") return true;
+    if (
+      !e.pointerType &&
+      typeof navigator !== "undefined" &&
+      navigator.maxTouchPoints > 0
+    ) {
+      return true;
+    }
+    /* Matches measurement profile — catches pointers typed oddly as `mouse` on some tablets/WebViews. */
+    if (MeasurementController.prefersTouchLikeMeasurement()) return true;
+    if (typeof window === "undefined") return false;
+    if (window.matchMedia("(pointer: coarse)").matches && e.pointerType !== "mouse") {
+      return true;
+    }
+    if (e.pointerType === "mouse" && this.compactViewportLikePhoneOrDevTools()) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Arm tap-to-pick only when the pointer is over the WebGL canvas rect and not on app chrome.
+   * Renderer siblings (e.g. CSS2D root) may be the event target even though the hit is visually on the model.
+   */
+  private pointerDownArmsModelTap(event: PointerEvent, canvas: HTMLCanvasElement): boolean {
+    const t = event.target;
+    if (t instanceof HTMLElement) {
+      if (
+        t.closest(
+          "button,a[href],input,textarea,select,label,[role='button'],[role='menuitem'],[role='tab']",
+        )
+      ) {
+        return false;
+      }
+    }
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX;
+    const y = event.clientY;
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return false;
+    if (t === canvas) return true;
+    const host = canvas.parentElement;
+    if (!(t instanceof Node) || !host?.contains(t)) return false;
+    if (t instanceof Element && t.closest("[data-eyeSteel-measure-labels]")) return false;
+    return true;
+  }
+
+  /** Keeps taps usable during measurement — disabling CameraControls avoids doc-level `pointermove` + `preventDefault` while bindings are NONE. */
+  private reinstateCanvasTouchBlocking() {
+    const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
+    if (!canvas) return;
+    canvas.style.touchAction = "none";
+    const host = canvas.parentElement;
+    if (host) host.style.touchAction = "none";
+  }
+
+  /** Measurement on touch: orbit off so gestures don't fight taps. Desktop: keep orbiting (CameraControls stay enabled). */
   setViewerTool(tool: ViewerToolMode) {
     if (this.disposed) return;
     this.viewerTool = tool;
+    const ctrl = this.world.camera.controls;
+
     if (tool === "measurement") {
+      if (ctrl && MeasurementController.prefersTouchLikeMeasurement()) {
+        this.measurementControlsEnabledSnapshot = ctrl.enabled;
+        ctrl.enabled = false;
+        this.measurementSuppressedControls = true;
+      }
+      this.reinstateCanvasTouchBlocking();
       this.measurementController.activate();
     } else {
       this.measurementController.deactivate();
+      if (ctrl && this.measurementSuppressedControls) {
+        ctrl.enabled = this.measurementControlsEnabledSnapshot;
+        this.measurementSuppressedControls = false;
+      }
     }
   }
 
@@ -254,9 +353,41 @@ export class ViewerEngine {
     this.measurementController.clearAll();
   }
 
+  /** Measurement taps on touch/pencil — commit on pointerdown so we don't rely on pointerup (often broken / paired incorrectly on mobile). */
+  private commitMeasurementTap(canvas: HTMLCanvasElement, clientX: number, clientY: number, pe: PointerEvent) {
+    // Only suppress synthetic mouse after real touch/pen — compact viewport uses real mouse in DevTools;
+    // suppressing mouse here skipped canvas pointerdown → no downPos → picks never ran on pointerup.
+    if (pe.pointerType === "touch" || pe.pointerType === "pen") {
+      this.suppressPrimaryMouseDownUntilMs = Date.now() + 450;
+    }
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const host = canvas.parentElement;
+    const moveInit: PointerEventInit = {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      pointerId: pe.pointerId,
+      pointerType: pe.pointerType,
+      isPrimary: pe.isPrimary,
+    };
+    /* That Open Measurement attaches `pointermove` to `canvas.parentElement`, not the canvas. */
+    host?.dispatchEvent(new PointerEvent("pointermove", moveInit));
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    void this.measurementController.tapCommit(ndc);
+  }
+
   private installPointerListeners() {
     const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
     if (!canvas) return;
+
+    canvas.style.touchAction = "none";
+    const host = canvas.parentElement;
+    if (host) host.style.touchAction = "none";
 
     const syncNdc = (event: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
@@ -267,12 +398,64 @@ export class ViewerEngine {
       );
     };
 
+    const syncNdcFromClient = (clientX: number, clientY: number) => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      this.lastPointerNdc.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1,
+      );
+    };
+
+    this.hostMeasurePointerDownCapture = (event: PointerEvent) => {
+      if (this.disposed || this.viewerTool !== "measurement") return;
+      if (!this.shouldInstantMeasurementTap(event)) return;
+      const { clientX: x, clientY: y } = event;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return;
+      syncNdcFromClient(x, y);
+      this.commitMeasurementTap(canvas, x, y, event);
+    };
+    this.container.addEventListener("pointerdown", this.hostMeasurePointerDownCapture, true);
+
     this.pointerMoveHandler = (event: PointerEvent) => syncNdc(event);
 
     this.pointerDownHandler = (event: PointerEvent) => {
+      /*
+       * Window capture runs before descendant listeners. Require pointer inside the WebGL rect; accept
+       * targets other than the canvas (CSS2D/sibling layers sit above the canvas but belong to the viewer).
+       * Strict `target === canvas` broke desktop when clicks hit those overlays.
+       */
+      if (!this.pointerDownArmsModelTap(event, canvas)) return;
       syncNdc(event);
       if (event.button !== 0 && event.pointerType === "mouse") return;
-      this.downPos = { x: event.clientX, y: event.clientY, t: Date.now() };
+      if (
+        event.pointerType === "mouse" &&
+        event.isPrimary &&
+        Date.now() < this.suppressPrimaryMouseDownUntilMs
+      ) {
+        return;
+      }
+
+      /* Instant measurement is handled on container capture (see hostMeasurePointerDownCapture). */
+      if (
+        this.viewerTool === "measurement" &&
+        this.shouldInstantMeasurementTap(event)
+      ) {
+        return;
+      }
+
+      this.downPos = {
+        x: event.clientX,
+        y: event.clientY,
+        t: Date.now(),
+        pointerType: event.pointerType,
+      };
+    };
+
+    this.pointerCancelHandler = () => {
+      this.downPos = null;
     };
 
     this.pointerUpHandler = async (event: PointerEvent) => {
@@ -283,8 +466,13 @@ export class ViewerEngine {
       const start = this.downPos;
       this.downPos = null;
 
+      const ptr = start.pointerType || event.pointerType;
+      const touchLike = ptr === "touch" || ptr === "pen";
+      const tapSlopSq = touchLike ? TAP_SLOP_SQ_TOUCH : TAP_SLOP_SQ_MOUSE;
+      const tapMaxMs = touchLike ? TAP_MAX_MS_TOUCH : TAP_MAX_MS_MOUSE;
+
       const distSq = dx * dx + dy * dy;
-      const isTap = distSq <= 144 && dt <= 700;
+      const isTap = distSq <= tapSlopSq && dt <= tapMaxMs;
       if (!isTap) return;
 
       const renderer = this.world.renderer;
@@ -296,7 +484,7 @@ export class ViewerEngine {
       const useY = event.clientY || start.y;
 
       if (this.viewerTool === "measurement") {
-        void this.measurementController.tapCommit();
+        this.commitMeasurementTap(canvas, useX, useY, event);
         return;
       }
 
@@ -329,16 +517,18 @@ export class ViewerEngine {
       }
     };
 
-    canvas.addEventListener("pointerdown", this.pointerDownHandler, true);
+    window.addEventListener("pointerdown", this.pointerDownHandler, true);
     canvas.addEventListener("pointermove", this.pointerMoveHandler);
     canvas.addEventListener("pointerup", this.pointerUpHandler, true);
+    canvas.addEventListener("pointercancel", this.pointerCancelHandler, true);
     window.addEventListener("pointerup", this.pointerUpHandler, true);
+    window.addEventListener("pointercancel", this.pointerCancelHandler, true);
   }
 
   private removePointerListeners() {
-    const canvas = this.world.renderer?.three.domElement as HTMLCanvasElement | undefined;
+    const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
     if (this.pointerDownHandler) {
-      canvas?.removeEventListener("pointerdown", this.pointerDownHandler, true);
+      window.removeEventListener("pointerdown", this.pointerDownHandler, true);
     }
     if (this.pointerMoveHandler) {
       canvas?.removeEventListener("pointermove", this.pointerMoveHandler);
@@ -347,9 +537,18 @@ export class ViewerEngine {
       canvas?.removeEventListener("pointerup", this.pointerUpHandler, true);
       window.removeEventListener("pointerup", this.pointerUpHandler, true);
     }
+    if (this.pointerCancelHandler) {
+      canvas?.removeEventListener("pointercancel", this.pointerCancelHandler, true);
+      window.removeEventListener("pointercancel", this.pointerCancelHandler, true);
+    }
+    if (this.hostMeasurePointerDownCapture) {
+      this.container.removeEventListener("pointerdown", this.hostMeasurePointerDownCapture, true);
+      this.hostMeasurePointerDownCapture = null;
+    }
     this.pointerDownHandler = null;
     this.pointerMoveHandler = null;
     this.pointerUpHandler = null;
+    this.pointerCancelHandler = null;
     this.downPos = null;
     this.pickCallback = null;
   }
@@ -464,6 +663,10 @@ export class ViewerEngine {
     if (this.disposed) return;
     this.disposed = true;
     try {
+      if (this.viewerTool === "measurement") {
+        const ctrl = this.world.camera.controls;
+        if (ctrl) ctrl.enabled = this.measurementControlsEnabledSnapshot;
+      }
       this.viewerTool = "none";
       this.measurementController.shutdown();
       for (const light of this.viewerLights) {

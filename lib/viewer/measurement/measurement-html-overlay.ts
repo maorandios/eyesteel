@@ -24,7 +24,7 @@ function createEndpointDotElement(): HTMLDivElement {
   el.style.cssText =
     `position:absolute;width:${ENDPOINT_DOT_SIZE_PX}px;height:${ENDPOINT_DOT_SIZE_PX}px;` +
     `border-radius:50%;background:${BADGE_BG_GRAY};transform:translate(-50%,-50%);` +
-    `box-shadow:0 1px 4px rgba(0,0,0,.35);pointer-events:none;z-index:21;`;
+    `box-shadow:0 1px 4px rgba(0,0,0,.35);pointer-events:none;z-index:46;`;
   return el;
 }
 
@@ -78,7 +78,7 @@ export class MeasurementHtmlOverlay {
     this.layer = document.createElement("div");
     this.layer.setAttribute("data-eyeSteel-measure-labels", "true");
     this.layer.style.cssText =
-      "position:absolute;inset:0;pointer-events:none;z-index:20;overflow:hidden;";
+      "position:absolute;inset:0;pointer-events:none;z-index:45;overflow:hidden;";
     host.appendChild(this.layer);
   }
 
@@ -161,7 +161,7 @@ export class MeasurementHtmlOverlay {
         const endDot = createEndpointDotElement();
         const badge = document.createElement("div");
         badge.style.cssText =
-          `position:absolute;transform:translate(-50%,-50%);display:inline-flex;flex-direction:row;direction:ltr;align-items:center;gap:4px;padding:6px 10px;border-radius:8px;font-size:14px;font-weight:600;color:white;background:${BADGE_BG_GRAY};box-shadow:0 2px 10px rgba(0,0,0,.28);white-space:nowrap;z-index:22;`;
+          `position:absolute;transform:translate(-50%,-50%);display:inline-flex;flex-direction:row;direction:ltr;align-items:center;gap:4px;padding:6px 10px;border-radius:8px;font-size:14px;font-weight:600;color:white;background:${BADGE_BG_GRAY};box-shadow:0 2px 10px rgba(0,0,0,.28);white-space:nowrap;z-index:47;pointer-events:none;`;
         this.layer.appendChild(startDot);
         this.layer.appendChild(endDot);
         this.layer.appendChild(badge);

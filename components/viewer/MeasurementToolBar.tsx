@@ -11,7 +11,7 @@ interface Props {
 export function MeasurementToolBar({ onFinish, onClear }: Props) {
   return (
     <div
-      className="absolute bottom-20 left-1/2 z-40 flex -translate-x-1/2 gap-3 px-2"
+      className="safe-bottom absolute bottom-32 left-1/2 z-50 flex -translate-x-1/2 gap-3 px-2"
       dir="rtl"
     >
       <Button
