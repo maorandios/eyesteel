@@ -362,18 +362,6 @@ export class ViewerEngine {
     }
     const rect = canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
-    const host = canvas.parentElement;
-    const moveInit: PointerEventInit = {
-      bubbles: true,
-      cancelable: true,
-      clientX,
-      clientY,
-      pointerId: pe.pointerId,
-      pointerType: pe.pointerType,
-      isPrimary: pe.isPrimary,
-    };
-    /* That Open Measurement attaches `pointermove` to `canvas.parentElement`, not the canvas. */
-    host?.dispatchEvent(new PointerEvent("pointermove", moveInit));
     const ndc = new THREE.Vector2(
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1,
@@ -419,7 +407,12 @@ export class ViewerEngine {
     };
     this.container.addEventListener("pointerdown", this.hostMeasurePointerDownCapture, true);
 
-    this.pointerMoveHandler = (event: PointerEvent) => syncNdc(event);
+    this.pointerMoveHandler = (event: PointerEvent) => {
+      syncNdc(event);
+      if (!this.disposed && this.viewerTool === "measurement") {
+        this.measurementController.scheduleHoverPick(this.lastPointerNdc.clone());
+      }
+    };
 
     this.pointerDownHandler = (event: PointerEvent) => {
       /*
@@ -665,7 +658,10 @@ export class ViewerEngine {
     try {
       if (this.viewerTool === "measurement") {
         const ctrl = this.world.camera.controls;
-        if (ctrl) ctrl.enabled = this.measurementControlsEnabledSnapshot;
+        if (ctrl && this.measurementSuppressedControls) {
+          ctrl.enabled = this.measurementControlsEnabledSnapshot;
+        }
+        this.measurementSuppressedControls = false;
       }
       this.viewerTool = "none";
       this.measurementController.shutdown();

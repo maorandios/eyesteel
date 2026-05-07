@@ -3,126 +3,61 @@
 import * as THREE from "three";
 import * as FRAGS from "@thatopen/fragments";
 import * as OBC from "@thatopen/components";
-import type { DimensionLine } from "@thatopen/components-front";
 import * as OBF from "@thatopen/components-front";
-import { MeasurementHtmlOverlay, hideThatOpenDimensionCss2d } from "@/lib/viewer/measurement/measurement-html-overlay";
+import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
+import {
+  computeSmartMeasureMetrics,
+  worldPointFromSnapHit,
+  type SnapRayHit,
+} from "@/lib/viewer/measurement/smart-measure-math";
+import { SmartMeasureOverlay } from "@/lib/viewer/measurement/smart-measure-overlay";
+import type { CompletedSmartSegment } from "@/lib/viewer/measurement/smart-measure-visuals";
+import { SmartMeasureVisuals } from "@/lib/viewer/measurement/smart-measure-visuals";
 
-type Css2dMarkLike = {
-  visible: boolean;
-  three: { element: unknown };
-};
+const SNAPS: FRAGS.SnappingClass[] = [
+  FRAGS.SnappingClass.LINE,
+  FRAGS.SnappingClass.POINT,
+  FRAGS.SnappingClass.FACE,
+];
 
-/** Dark gray for dimension line + badge (That Open `linesMaterial` + HTML overlay). */
-const MEASUREMENT_DIM_GRAY = 0x404040;
-
-function createHiddenMeasurementEndpointElement(): HTMLDivElement {
-  const el = document.createElement("div");
-  el.setAttribute("data-eyeSteel-measurement-endpoint", "true");
-  el.style.cssText =
-    "box-sizing:border-box;width:0;height:0;margin:0;padding:0;border:0;" +
-    "opacity:0;visibility:hidden;pointer-events:none;overflow:hidden;";
-  return el;
+/** Silence That Open LengthMeasurement singleton — we use custom smart measure only. */
+function silenceLengthMeasurement(m: OBF.LengthMeasurement | null) {
+  if (!m) return;
+  try {
+    m.cancelCreation();
+    m.enabled = false;
+    m.visible = false;
+  } catch {
+    /* noop */
+  }
 }
 
 /**
- * Thin wrapper around That Open {@link OBF.LengthMeasurement}.
- * Keeps configuration out of {@link ViewerEngine} and avoids coupling to selection.
+ * Two‑point smart measurement: direct, vertical (along scene up), and horizontal span.
+ * Snapping uses fragment LINE / POINT / FACE (vertices + edges + faces).
  */
 export class MeasurementController {
-  private measurer: OBF.LengthMeasurement | null = null;
-  private configured = false;
+  private readonly components: OBC.Components;
   private attachedWorld: OBC.World | null = null;
-  private htmlOverlay: MeasurementHtmlOverlay | null = null;
+  private overlay: SmartMeasureOverlay | null = null;
+  private visuals: SmartMeasureVisuals | null = null;
   private tapCommitChain = Promise.resolve();
 
-  constructor(private readonly components: OBC.Components) {}
+  private active = false;
+  /** Draft first point waiting for second tap. */
+  private draftP1: THREE.Vector3 | null = null;
+  /** Hover snap preview while picking. */
+  private hoverWorld: THREE.Vector3 | null = null;
+  private segments: CompletedSmartSegment[] = [];
 
-  private ensure(): OBF.LengthMeasurement {
-    if (!this.measurer) {
-      this.measurer = this.components.get(OBF.LengthMeasurement);
-    }
-    const m = this.measurer;
-    if (!this.configured) {
-      m.mode = "free";
-      /** LINE + POINT + FACE matches That Open defaults — POINT-only can miss picks on some IFC tessellation. */
-      m.snappings = [
-        FRAGS.SnappingClass.LINE,
-        FRAGS.SnappingClass.POINT,
-        FRAGS.SnappingClass.FACE,
-      ];
-      m.units = "mm";
-      m.rounding = 1;
-      m.color = new THREE.Color(MEASUREMENT_DIM_GRAY);
-      m.linesEndpointElement = createHiddenMeasurementEndpointElement();
-      // pickMode / delay / pickerSize — set in activate() via applyMeasurementPickProfile (desktop vs touch).
-      // Do not set `enabled` / `visible` here: Measurement.setEvents requires world first.
-      this.configured = true;
-    }
-    return m;
+  private hoverRaf = 0;
+  private unsubBreakdown: (() => void) | null = null;
+  private lastBreakdownShown = false;
+
+  constructor(components: OBC.Components) {
+    this.components = components;
   }
 
-  /** Assign world before activate (same instance as the IFC viewer). */
-  attach(world: OBC.World) {
-    const m = this.ensure();
-    m.world = world;
-    m.visible = false;
-    m.enabled = false;
-    this.attachedWorld = world;
-    const parent = world.renderer?.three?.domElement?.parentElement;
-    if (parent instanceof HTMLElement) {
-      this.htmlOverlay?.dispose();
-      this.htmlOverlay = new MeasurementHtmlOverlay(parent);
-    }
-  }
-
-  /**
-   * Hide the library snap marker (CSS2D dot). Run every frame — when measurement mode is off the
-   * picker can still leave the last marker visible (offset/glitched vs our DOM overlay).
-   */
-  suppressVertexPickerMarker() {
-    if (!this.measurer) return;
-    const picker = (
-      this.measurer as unknown as {
-        _vertexPicker?: { marker?: Css2dMarkLike | null };
-      }
-    )._vertexPicker;
-    const marker = picker?.marker;
-    if (!marker) return;
-    marker.visible = false;
-    const el = marker.three.element;
-    if (el instanceof HTMLElement) {
-      el.style.display = "none";
-      el.style.visibility = "hidden";
-      el.style.opacity = "0";
-      el.style.pointerEvents = "none";
-    }
-  }
-
-  /** In-progress segment uses the same CSS2D endpoints/label as committed lines. */
-  private hidePreviewDimensionCss2d() {
-    const dim = (this.measurer as unknown as { _temp?: { dimension?: DimensionLine } })._temp
-      ?.dimension;
-    if (dim) hideThatOpenDimensionCss2d(dim);
-  }
-
-  /** Call each frame after render so HTML badges track the camera (CSS2D labels stay hidden). */
-  syncHtmlLabels() {
-    if (!this.measurer || !this.attachedWorld?.renderer?.three?.domElement) return;
-    this.suppressVertexPickerMarker();
-    this.hidePreviewDimensionCss2d();
-    const canvas = this.attachedWorld.renderer.three.domElement;
-    const camera = this.attachedWorld.camera?.three;
-    if (!camera || !this.htmlOverlay) return;
-    const preview = (this.measurer as unknown as { _temp?: { dimension?: DimensionLine } })._temp
-      ?.dimension;
-    const lines = preview ? [...this.measurer.lines, preview] : this.measurer.lines;
-    this.htmlOverlay.sync(lines, camera, canvas);
-  }
-
-  /**
-   * Coarse pointer / pure touch UIs: tighter GPU pick kernel + pick-on-stop so huge IFCs stay smooth.
-   * Mouse + hover (desktop): MOUSE_MOVE matches stock That Open behaviour (snappy line preview).
-   */
   /** Used by {@link ViewerEngine} for orbit suppression vs measurement instant taps. */
   static prefersTouchLikeMeasurement(): boolean {
     if (typeof window === "undefined") return false;
@@ -137,131 +72,260 @@ export class MeasurementController {
     return false;
   }
 
-  private static applyMeasurementPickProfile(m: OBF.LengthMeasurement, touchLike: boolean) {
-    if (touchLike) {
-      m.pickMode = OBF.MeasurementPickMode.MOUSE_STOP;
-      m.delay = 280;
-      /** Library default is 6px; we had raised this to 14 which reads as a wide snap on finger taps. */
-      m.pickerSize = 6;
-    } else {
-      m.pickMode = OBF.MeasurementPickMode.MOUSE_MOVE;
-      m.delay = 140;
-      m.pickerSize = 12;
+  attach(world: OBC.World) {
+    this.attachedWorld = world;
+    silenceLengthMeasurement(this.safeLibraryMeasurer());
+
+    const parent = world.renderer?.three?.domElement?.parentElement;
+    if (parent instanceof HTMLElement) {
+      this.overlay?.dispose();
+      this.overlay = new SmartMeasureOverlay(parent);
     }
+    if (!this.visuals) this.visuals = new SmartMeasureVisuals();
+    world.scene.three.add(this.visuals.root);
   }
 
   activate() {
-    const m = this.ensure();
-    MeasurementController.applyMeasurementPickProfile(
-      m,
-      MeasurementController.prefersTouchLikeMeasurement(),
-    );
-    m.visible = true;
-    m.enabled = true;
+    const world = this.attachedWorld;
+    if (!world || !this.visuals || !this.overlay) return;
+    this.active = true;
+    silenceLengthMeasurement(this.safeLibraryMeasurer());
+    this.draftP1 = null;
+    this.hoverWorld = null;
+    useSmartMeasureStore.getState().setPhase("pickFirst");
+    useSmartMeasureStore.getState().setHint("לחץ על נקודה ראשונה על המודל");
+
+    this.unsubBreakdown?.();
+    this.lastBreakdownShown = useSmartMeasureStore.getState().showBreakdown;
+    this.unsubBreakdown = useSmartMeasureStore.subscribe((state) => {
+      if (state.showBreakdown === this.lastBreakdownShown) return;
+      this.lastBreakdownShown = state.showBreakdown;
+      if (!this.visuals) return;
+      this.visuals.rebuildCompleted(this.segments, state.showBreakdown);
+      void this.attachedWorld?.renderer?.update?.();
+    });
   }
 
   deactivate() {
-    if (!this.measurer) return;
-    this.measurer.cancelCreation();
-    this.measurer.enabled = false;
+    this.active = false;
+    this.unsubBreakdown?.();
+    this.unsubBreakdown = null;
+    this.cancelHoverRaf();
+    this.hoverWorld = null;
+    this.visuals?.clearDraft();
+    this.overlay?.hideSnap();
+    silenceLengthMeasurement(this.safeLibraryMeasurer());
   }
 
-  /**
-   * Two taps => two {@link OBF.LengthMeasurement.create} calls complete one segment (library contract).
-   *
-   * That Open's raycaster mouse helper only follows `pointermove` / `touchstart`, not `pointerdown`.
-   * A tap without movement leaves `lastPick` / internal mouse stale, so the first point often misses snap.
-   * We prime `lastPick` with an explicit snapped ray at the tap NDC before `create()`.
-   */
+  private safeLibraryMeasurer(): OBF.LengthMeasurement | null {
+    try {
+      return this.components.get(OBF.LengthMeasurement);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Legacy hook — That Open vertex picker unused. */
+  suppressVertexPickerMarker() {
+    silenceLengthMeasurement(this.safeLibraryMeasurer());
+  }
+
+  scheduleHoverPick(ndc: THREE.Vector2) {
+    if (!this.active || !this.attachedWorld) return;
+    if (this.hoverRaf) return;
+    this.hoverRaf = requestAnimationFrame(() => {
+      this.hoverRaf = 0;
+      void this.runHover(ndc);
+    });
+  }
+
+  private cancelHoverRaf() {
+    if (this.hoverRaf) {
+      cancelAnimationFrame(this.hoverRaf);
+      this.hoverRaf = 0;
+    }
+  }
+
+  private async runHover(ndc: THREE.Vector2) {
+    const world = this.attachedWorld;
+    if (!world || !this.overlay || !this.active) return;
+    try {
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      const rendererLike = world.renderer as { needsUpdate?: boolean; update?: () => void };
+      if (rendererLike && typeof rendererLike.needsUpdate === "boolean") {
+        rendererLike.needsUpdate = true;
+        rendererLike.update?.();
+      }
+      const raycaster = this.components.get(OBC.Raycasters).get(world);
+      const hit = await raycaster.castRay({
+        snappingClasses: SNAPS,
+        position: ndc,
+      });
+      const snapHit = hit as SnapRayHit | null;
+      this.hoverWorld = snapHit ? worldPointFromSnapHit(snapHit) : null;
+
+      const canvas = world.renderer?.three?.domElement;
+      const camera = world.camera?.three;
+      if (camera && canvas) {
+        this.overlay.setSnapMarker(canvas, camera, this.hoverWorld);
+      }
+
+      if (this.draftP1 && this.hoverWorld && this.visuals) {
+        this.visuals.setDraft(this.draftP1, this.hoverWorld);
+      } else if (this.visuals) {
+        this.visuals.clearDraft();
+      }
+      void world.renderer?.update?.();
+    } catch {
+      this.hoverWorld = null;
+      this.overlay?.hideSnap();
+    }
+  }
+
+  syncHtmlLabels() {
+    const world = this.attachedWorld;
+    if (!world?.renderer?.three?.domElement || !world.camera?.three || !this.overlay) return;
+
+    const canvas = world.renderer.three.domElement;
+    const camera = world.camera.three;
+    const showBreakdown = useSmartMeasureStore.getState().showBreakdown;
+
+    const specs: Array<{ id: string; world: THREE.Vector3; meters: number; variant: "main" | "break" }> =
+      [];
+
+    this.segments.forEach((seg, i) => {
+      const mid = new THREE.Vector3().addVectors(seg.p1, seg.p2).multiplyScalar(0.5);
+      specs.push({
+        id: `seg-${i}-main`,
+        world: mid,
+        meters: seg.metrics.directM,
+        variant: "main",
+      });
+      if (showBreakdown) {
+        const midV = new THREE.Vector3().addVectors(seg.p1, seg.metrics.corner).multiplyScalar(0.5);
+        const midH = new THREE.Vector3().addVectors(seg.metrics.corner, seg.p2).multiplyScalar(0.5);
+        specs.push({
+          id: `seg-${i}-v`,
+          world: midV,
+          meters: seg.metrics.heightM,
+          variant: "break",
+        });
+        specs.push({
+          id: `seg-${i}-h`,
+          world: midH,
+          meters: seg.metrics.horizontalM,
+          variant: "break",
+        });
+      }
+    });
+
+    this.overlay.syncDimensionBadges(canvas, camera, specs);
+
+    if (this.active) {
+      this.overlay.setSnapMarker(canvas, camera, this.hoverWorld);
+    } else {
+      this.overlay.hideSnap();
+    }
+  }
+
   async tapCommit(ndc: THREE.Vector2) {
     const ndcCopy = ndc.clone();
     this.tapCommitChain = this.tapCommitChain
       .then(() => this.tapCommitInner(ndcCopy))
       .catch((err) => {
-        console.error("[measurement] tapCommit failed:", err);
+        console.error("[smart-measure] tapCommit failed:", err);
       });
     await this.tapCommitChain;
   }
 
   private async tapCommitInner(ndc: THREE.Vector2) {
-    const m = this.ensure();
-    if (!m.enabled || !this.attachedWorld) return;
+    const world = this.attachedWorld;
+    const visuals = this.visuals;
+    if (!this.active || !world || !visuals) return;
 
-    /* GPU picks read render buffers — one painted frame + needsUpdate avoids stale/empty reads on mobile WebGL. */
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    const rendererLike = this.attachedWorld.renderer as {
-      needsUpdate?: boolean;
-      update?: () => void;
-    };
+    const rendererLike = world.renderer as { needsUpdate?: boolean; update?: () => void };
     if (rendererLike && typeof rendererLike.needsUpdate === "boolean") {
       rendererLike.needsUpdate = true;
       rendererLike.update?.();
     }
 
-    const raycaster = this.components.get(OBC.Raycasters).get(this.attachedWorld);
-    const fresh = await raycaster.castRay({
-      snappingClasses: m.snappings,
+    const raycaster = this.components.get(OBC.Raycasters).get(world);
+    const hit = await raycaster.castRay({
+      snappingClasses: SNAPS,
       position: ndc,
     });
-    type FragSnapHit = typeof fresh & {
-      snappedEdgeP1?: THREE.Vector3;
-      snappedEdgeP2?: THREE.Vector3;
-    };
-
-    (m as unknown as { lastPick: typeof fresh }).lastPick = fresh;
-
-    /* Second tap runs `create()` → `endCreation()` without `pointermove`, so `_temp.line.end`
-     * stays on the first point unless we mirror {@link OBF.LengthMeasurement}'s `updatePreviewLine`. */
-    const temp = (m as unknown as {
-      _temp: {
-        isDragging: boolean;
-        line: { start: THREE.Vector3; end: THREE.Vector3 };
-        dimension?: DimensionLine & { start: THREE.Vector3; end: THREE.Vector3; visible?: boolean };
-      };
-    })._temp;
-
-    if (temp?.isDragging && temp.dimension) {
-      if (m.mode === "free" && fresh?.point) {
-        temp.line.end.copy(fresh.point);
-        temp.dimension.end = temp.line.end;
-      } else if (m.mode === "edge") {
-        const snapHit = fresh as FragSnapHit;
-        const p1 = snapHit?.snappedEdgeP1;
-        const p2 = snapHit?.snappedEdgeP2;
-        if (p1 && p2) {
-          temp.line.start.copy(p1);
-          temp.line.end.copy(p2);
-          temp.dimension.start = temp.line.start;
-          temp.dimension.end = temp.line.end;
-          temp.dimension.visible = true;
-        }
-      }
+    const snapHit = hit as SnapRayHit | null;
+    const p = snapHit ? worldPointFromSnapHit(snapHit) : null;
+    if (!p) {
+      useSmartMeasureStore.getState().setHint("לא נמצאה נקודת הצמדה — נסה קרוב לקודקוד או לקצה");
+      return;
     }
 
-    await m.create();
+    const scene = world.scene.three;
+    const up = scene.up.clone();
 
-    this.attachedWorld.renderer?.update?.();
+    if (!this.draftP1) {
+      this.draftP1 = p.clone();
+      useSmartMeasureStore.getState().setPhase("pickSecond");
+      useSmartMeasureStore.getState().setHint("לחץ על נקודה שנייה");
+      visuals.clearDraft();
+      void world.renderer?.update?.();
+      return;
+    }
+
+    const p2 = p.clone();
+    const p1 = this.draftP1.clone();
+    this.draftP1 = null;
+    visuals.clearDraft();
+
+    const metrics = computeSmartMeasureMetrics(p1, p2, up);
+    const segment: CompletedSmartSegment = { p1, p2, metrics };
+    this.segments.push(segment);
+
+    const showBreakdown = useSmartMeasureStore.getState().showBreakdown;
+    visuals.addCompleted(segment, showBreakdown);
+
+    useSmartMeasureStore.getState().applyCompleted(
+      metrics.directM * 1000,
+      metrics.heightM * 1000,
+      metrics.horizontalM * 1000,
+    );
+
+    void world.renderer?.update?.();
   }
 
   clearAll() {
-    if (!this.measurer) return;
-    this.measurer.cancelCreation();
-    this.measurer.list.clear();
-    this.htmlOverlay?.clearDom();
+    this.draftP1 = null;
+    this.hoverWorld = null;
+    this.segments = [];
+    this.visuals?.clearDraft();
+    this.visuals?.clearCompleted();
+    this.overlay?.clearDom();
+    useSmartMeasureStore.getState().resetSession();
+    void this.attachedWorld?.renderer?.update?.();
   }
 
-  /**
-   * Disable measurement when disposing the viewer. Do not dispose the singleton
-   * returned by {@link OBC.Components.get}(LengthMeasurement).
-   */
   shutdown() {
-    this.htmlOverlay?.dispose();
-    this.htmlOverlay = null;
+    this.cancelHoverRaf();
+    this.unsubBreakdown?.();
+    this.unsubBreakdown = null;
+    this.active = false;
+    const scene = this.attachedWorld?.scene.three;
+    if (scene && this.visuals) {
+      scene.remove(this.visuals.root);
+      this.visuals.dispose();
+      this.visuals = null;
+    }
+    this.overlay?.dispose();
+    this.overlay = null;
     this.attachedWorld = null;
-    if (!this.measurer) return;
-    this.measurer.cancelCreation();
-    this.measurer.enabled = false;
-    this.measurer.visible = false;
-    this.measurer.world = null;
+    const lib = this.safeLibraryMeasurer();
+    silenceLengthMeasurement(lib);
+    try {
+      if (lib) lib.world = null;
+    } catch {
+      /* noop */
+    }
   }
 }

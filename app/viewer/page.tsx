@@ -3,16 +3,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
-import { TopBar } from "@/components/viewer/TopBar";
-import { BottomModeNav } from "@/components/viewer/BottomModeNav";
-import { MeasurementToolBar } from "@/components/viewer/MeasurementToolBar";
-import { FloatingActions } from "@/components/viewer/actions/FloatingActions";
-import { BottomSheet } from "@/components/sheets/BottomSheet";
+import { CompactModeNav } from "@/components/viewer/CompactModeNav";
+import { SmartMeasurementCard } from "@/components/viewer/SmartMeasurementCard";
+import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
 import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
+import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
 import { he } from "@/lib/i18n/he";
 import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
@@ -55,15 +53,12 @@ export default function ViewerPage() {
     mode,
     setMode,
     search,
-    setSearch,
     activeSheet,
     setActiveSheet,
     categoryVisibility,
-    toggleCategory,
     setLoadingState,
     loadingState,
     transparencyEnabled,
-    setTransparencyEnabled,
   } = useAppStore();
 
   const viewerTool = useViewerToolStore((s) => s.activeTool);
@@ -113,6 +108,12 @@ export default function ViewerPage() {
 
   const onReady = useCallback((instance: ViewerEngine | null) => setEngine(instance), []);
   const modeLabel = modeConfig[mode].label;
+
+  useEffect(() => {
+    if (viewerTool !== "measurement") {
+      useSmartMeasureStore.getState().setMeasurementDetailsOpen(false);
+    }
+  }, [viewerTool]);
 
   const toggleMeasurementTool = useCallback(() => {
     setViewerTool(viewerTool === "measurement" ? "none" : "measurement");
@@ -346,116 +347,71 @@ export default function ViewerPage() {
     return () => engine.setPickCallback(null);
   }, [engine, analyzerData, selectionMode, selectAssembly, selectPart]);
 
+  const handleDockSelectionMode = useCallback((m: SelectionMode) => {
+    setSelectionMode(m);
+    setSelectionStatus(
+      m === "assembly"
+        ? "מצב Assembly: לחץ אלמנט במודל או שורה בטבלה"
+        : "מצב Part: לחץ אלמנט במודל או שורה בטבלה",
+    );
+  }, []);
+
+  const clearViewerSelection = useCallback(async () => {
+    await selectAssembly(null);
+    await selectPart(null);
+    setProfileGroupDetail(null);
+    setSelectionStatus("נוקה");
+  }, [selectAssembly, selectPart]);
+
   const showDataPanel = activeSheet === "details";
 
   return (
     <main className="relative h-screen w-screen overflow-hidden">
       <ViewerCanvas onReady={onReady} />
-      <TopBar modeLabel={modeLabel} />
-      <div className="absolute right-3 top-10 z-20 text-xs text-red-300">
+
+      <div className="pointer-events-auto absolute left-3 top-3 z-40 safe-top">
+        <Button variant="secondary" size="lg" className="shadow-lg" onClick={() => router.push("/")}>
+          {he.backToUpload}
+        </Button>
+      </div>
+
+      <div className="pointer-events-auto absolute left-3 top-[3.25rem] z-30 max-w-[70vw] text-xs text-red-400 safe-top">
         {loadingState === "error" ? "שגיאה בטעינת IFC" : ""}
       </div>
 
-      <div className="absolute right-3 top-20 z-20">
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={() => setActiveSheet("details")}>
-            נתוני מודל
-          </Button>
-          <Button
-            variant={selectionMode === "assembly" ? "default" : "secondary"}
-            onClick={() => {
-              setSelectionMode("assembly");
-              setSelectionStatus("מצב Assembly: לחץ אלמנט במודל או שורה בטבלה");
-            }}
-          >
-            Assembly
-          </Button>
-          <Button
-            variant={selectionMode === "part" ? "default" : "secondary"}
-            onClick={() => {
-              setSelectionMode("part");
-              setSelectionStatus("מצב Part: לחץ אלמנט במודל או שורה בטבלה");
-            }}
-          >
-            Part
-          </Button>
-          <Button
-            variant="ghost"
-            onClick={() => {
-              selectAssembly(null);
-              selectPart(null);
-              setProfileGroupDetail(null);
-              setSelectionStatus("נוקה");
-            }}
-          >
-            נקה
-          </Button>
-          <Button variant="secondary" onClick={() => router.push("/")}>
-            {he.backToUpload}
-          </Button>
+      <CompactModeNav mode={mode} onModeChange={setMode} />
+
+      <div className="pointer-events-auto absolute right-3 top-[4.75rem] z-20 flex max-w-[min(19rem,88vw)] flex-col items-end gap-1 safe-top">
+        {analyzerData && (
+          <div className="rounded-lg border border-zinc-700 bg-zinc-900/88 px-2 py-1 text-[10px] leading-tight text-zinc-300">
+            {formatCount(analyzerData.assemblies.length)} הרכבות · {formatCount(analyzerData.parts.length)}{" "}
+            חלקים
+          </div>
+        )}
+        <div className="w-full truncate rounded-lg border border-zinc-700 bg-zinc-900/88 px-2 py-1 text-[10px] text-zinc-300">
+          בחירה: {selectionStatus}
         </div>
+        <Button variant="ghost" className="h-8 px-2 text-[11px] text-zinc-400 hover:text-zinc-100" onClick={() => void clearViewerSelection()}>
+          נקה בחירה
+        </Button>
       </div>
 
-      {analyzerData && (
-        <div className="absolute right-3 top-[8.5rem] z-20 rounded-xl border border-zinc-700 bg-zinc-900/85 px-3 py-2 text-xs text-zinc-200">
-          {formatCount(analyzerData.assemblies.length)} הרכבות / {formatCount(analyzerData.parts.length)}{" "}
-          חלקים
-        </div>
-      )}
-      <div className="absolute right-3 top-[11rem] z-20 max-w-[90vw] truncate rounded-xl border border-zinc-700 bg-zinc-900/85 px-3 py-2 text-xs text-zinc-200">
-        בחירה: {selectionStatus}
-      </div>
-
-      <FloatingActions
-        onSearch={() => setActiveSheet("search")}
-        onLayers={() => setActiveSheet("layers")}
-        onResetView={() => engine?.resetView()}
-        onFitAll={() => engine?.fitAll()}
+      <ViewerBottomDock
+        selectionMode={selectionMode}
+        onSelectionModeChange={handleDockSelectionMode}
+        onDashboard={() => setActiveSheet("details")}
         measurementActive={viewerTool === "measurement"}
         onMeasurementToggle={toggleMeasurementTool}
+        onMeasurementClear={() => engine?.clearMeasurements()}
+        onMeasurementFinish={finishMeasurementTool}
       />
-      {viewerTool === "measurement" && (
-        <MeasurementToolBar
-          onFinish={finishMeasurementTool}
-          onClear={() => engine?.clearMeasurements()}
-        />
-      )}
-      <BottomModeNav mode={mode} onModeChange={setMode} />
 
-      <BottomSheet open={activeSheet === "search" || activeSheet === "layers"} title="כלים">
-        {activeSheet === "search" && (
-          <div className="space-y-3">
-            <Input
-              placeholder="חפש Assembly / Part / Element"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-            <Button className="w-full" onClick={() => setActiveSheet("none")}>
-              סגור
-            </Button>
-          </div>
-        )}
-        {activeSheet === "layers" && (
-          <div className="grid grid-cols-2 gap-2">
-            {Object.keys(categoryVisibility).map((cat) => (
-              <Button key={cat} variant="secondary" onClick={() => toggleCategory(cat)}>
-                {cat}
-              </Button>
-            ))}
-            <Button
-              className="col-span-2"
-              onClick={() => setTransparencyEnabled(!transparencyEnabled)}
-            >
-              {transparencyEnabled ? "בטל שקיפות" : "מצב שקיפות"}
-            </Button>
-          </div>
-        )}
-      </BottomSheet>
+      {viewerTool === "measurement" && <SmartMeasurementCard />}
 
       {showDataPanel && (
         <div className="pointer-events-none absolute inset-0 z-30 flex justify-end">
           <aside
-            className="pointer-events-auto flex h-full w-[22rem] max-w-[92vw] shrink-0 flex-col border-l border-zinc-700 bg-zinc-950/95 p-4 pt-24 shadow-2xl"
+            className="pointer-events-auto flex h-full w-[22rem] max-w-[92vw] shrink-0 flex-col border-l border-zinc-700 bg-zinc-950/95 p-4 pt-16 shadow-2xl"
             dir="rtl"
           >
           <div className="mb-3 flex items-center justify-between gap-2">
