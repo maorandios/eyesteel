@@ -442,6 +442,182 @@ def _resolve_part_profile(part: Any, psets: dict[str, Any], debug_hits: list[str
     return None
 
 
+_TEKLA_COMMON_PSET_NAMES = ("Tekla Common",)
+
+_TOP_ELEVATION_PROPS = (
+    "Top elevation",
+    "Top Elevation",
+)
+_BOTTOM_ELEVATION_PROPS = (
+    "Bottom elevation",
+    "Bottom Elevation",
+)
+
+
+def _direct_tekla_common_part_elevation_raw(
+    ent: Any, role: str, debug_hits: list[str] | None
+) -> Any:
+    """Single-member Top/Bottom elevation from Tekla Common (not cast-unit assembly elevations)."""
+    if ent is None:
+        return None
+    props = _TOP_ELEVATION_PROPS if role == "top" else _BOTTOM_ELEVATION_PROPS
+    for pset_name in _TEKLA_COMMON_PSET_NAMES:
+        for prop in props:
+            try:
+                val = element.get_pset(ent, pset_name, prop)
+            except Exception:
+                val = None
+            if val is not None:
+                if debug_hits is not None:
+                    debug_hits.append(f"{pset_name}.{prop}")
+                return val
+    return None
+
+
+def _find_tekla_common_part_elevation_raw(
+    psets: dict[str, Any], role: str, debug_hits: list[str] | None
+) -> Any:
+    tc = _get_pset_case_insensitive(psets, ["Tekla Common"])
+    if not isinstance(tc, dict):
+        return None
+    role_word = "top" if role == "top" else "bottom"
+    for prop_key, val in tc.items():
+        if str(prop_key).strip().lower() == "id":
+            continue
+        kl = _normalize_prop_key(str(prop_key)).replace("_", " ")
+        if "elevation" not in kl or role_word not in kl:
+            continue
+        if "assembly" in kl and "cast" in kl and "unit" in kl:
+            continue
+        if debug_hits is not None:
+            debug_hits.append(str(prop_key))
+        return val
+    return None
+
+
+def _resolve_part_local_elevation_mm(
+    part: Any,
+    psets: dict[str, Any],
+    converter: UnitConverter,
+    role: str,
+    debug_hits: list[str] | None,
+) -> float | None:
+    raw = _direct_tekla_common_part_elevation_raw(part, role, debug_hits)
+    if raw is None:
+        try:
+            decl = element.get_type(part)
+        except Exception:
+            decl = None
+        raw = _direct_tekla_common_part_elevation_raw(decl, role, debug_hits)
+    if raw is None:
+        raw = _find_tekla_common_part_elevation_raw(psets, role, debug_hits)
+    if raw is None:
+        return None
+    return elevation_raw_to_mm(_unwrap_numeric_property_value(raw), converter)
+
+
+_PROFILE_PSET_NAMES_WALL = (
+    "Profile",
+    "Pset_ProfileCommon",
+)
+
+
+def _direct_wall_thickness_raw(ent: Any, debug_hits: list[str] | None) -> Any:
+    if ent is None:
+        return None
+    props = ("WallThickness", "Wall thickness")
+    for pset_name in _PROFILE_PSET_NAMES_WALL:
+        for prop in props:
+            try:
+                val = element.get_pset(ent, pset_name, prop)
+            except Exception:
+                val = None
+            if val is not None:
+                if debug_hits is not None:
+                    debug_hits.append(f"{pset_name}.{prop}")
+                return val
+    return None
+
+
+def _scan_psets_for_wall_thickness_raw(psets: dict[str, Any], debug_hits: list[str] | None) -> Any:
+    """WallThickness may live under a differently spelled Profile set or duplicated on Tekla psets."""
+    best: tuple[int, str, str, Any] | None = None
+    for pname, blob in psets.items():
+        if not isinstance(blob, dict):
+            continue
+        pn_norm = _normalize_prop_key(str(pname))
+        p_bonus = 3 if "profile" in pn_norm.replace(" ", "") else 0
+        for key, val in blob.items():
+            if str(key).strip().lower() == "id":
+                continue
+            kl = _normalize_prop_key(str(key))
+            compact = kl.replace(" ", "").replace("_", "").replace("-", "")
+            if compact == "wallthickness" or compact.endswith("wallthickness"):
+                rank = p_bonus + len(compact)
+                cand = (rank, str(pname), str(key), val)
+                if best is None or rank > best[0]:
+                    best = cand
+    if best is None:
+        return None
+    if debug_hits is not None:
+        debug_hits.append(f"{best[1]}.{best[2]}")
+    return best[3]
+
+
+def _wall_thickness_mm_from_profile_catalog(profile: str | None) -> float | None:
+    """Last segment wall thickness for hollow catalogs (RHS…*5) or second segment (TUBE273*8)."""
+    if not profile:
+        return None
+    u = profile.strip().upper()
+    segs = [s.strip() for s in re.split(r"\*", u) if s.strip()]
+    if len(segs) < 2:
+        return None
+    hollow_prefix = ("RHS", "SHS", "CHS", "TUBE", "PIPE")
+    if not any(segs[0].startswith(p) for p in hollow_prefix):
+        return None
+    tail = segs[-1] if len(segs) >= 3 else segs[1]
+    m = re.match(r"^(\d+(?:[.,]\d+)?)", tail)
+    if not m:
+        return None
+    try:
+        v = float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def _resolve_wall_thickness_mm(
+    part: Any,
+    psets: dict[str, Any],
+    profile_pset: dict[str, Any],
+    converter: UnitConverter,
+    profile_str: str | None,
+    debug_hits: list[str] | None,
+) -> float | None:
+    raw = _pick_value(profile_pset, ["WallThickness", "Wall thickness"], debug_hits)
+    if raw is None:
+        raw = _direct_wall_thickness_raw(part, debug_hits)
+    if raw is None:
+        try:
+            decl = element.get_type(part)
+        except Exception:
+            decl = None
+        raw = _direct_wall_thickness_raw(decl, debug_hits)
+    if raw is None:
+        raw = _scan_psets_for_wall_thickness_raw(psets, debug_hits)
+    if raw is None:
+        try:
+            vp = element.get_psets(part, should_inherit=True, verbose=True) or {}
+        except Exception:
+            vp = {}
+        raw = _scan_psets_for_wall_thickness_raw(vp, debug_hits)
+    if raw is not None:
+        mm = converter.to_mm(_unwrap_numeric_property_value(raw))
+        if mm is not None:
+            return mm
+    return _wall_thickness_mm_from_profile_catalog(profile_str)
+
+
 def extract_part_data(
     part: Any,
     converter: UnitConverter,
@@ -456,9 +632,17 @@ def extract_part_data(
 
     x_dim = converter.to_mm(_pick_value(profile_pset, ["XDim", "Width"], debug_hits))
     y_dim = converter.to_mm(_pick_value(profile_pset, ["YDim", "Height"], debug_hits))
+    wall_thickness_mm = _resolve_wall_thickness_mm(
+        part, psets, profile_pset, converter, profile, debug_hits
+    )
     thickness = converter.to_mm(
         _pick_value(profile_pset, ["WallThickness", "Thickness", "t"], debug_hits)
     )
+
+    if x_dim is None:
+        x_dim = converter.to_mm(_pick_value(quantity_pset, ["Width"], debug_hits))
+    if y_dim is None:
+        y_dim = converter.to_mm(_pick_value(quantity_pset, ["Height"], debug_hits))
 
     length_mm = converter.to_mm(_pick_value(quantity_pset, ["Length", "TotalLength"], debug_hits))
     if length_mm is None:
@@ -493,6 +677,9 @@ def extract_part_data(
 
     part_mark = _resolve_part_mark(part, psets, debug_hits)
 
+    top_mm = _resolve_part_local_elevation_mm(part, psets, converter, "top", debug_hits)
+    bottom_mm = _resolve_part_local_elevation_mm(part, psets, converter, "bottom", debug_hits)
+
     return {
         "id": _entity_uid(part),
         "expressId": _entity_express_id(part),
@@ -507,7 +694,10 @@ def extract_part_data(
         "xDim": x_dim,
         "yDim": y_dim,
         "thickness": thickness,
+        "wallThicknessMm": wall_thickness_mm,
         "quantity": quantity,
+        "topElevation": top_mm,
+        "bottomElevation": bottom_mm,
     }
 
 

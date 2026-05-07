@@ -58,8 +58,13 @@ export interface AnalyzerPart {
   xDim: number | null;
   yDim: number | null;
   thickness: number | null;
+  /** IFC Profile `WallThickness` only — UI shows עובי דופן when present */
+  wallThicknessMm?: number | null;
   /** Tekla Quantity / IFC when present */
   quantity?: number | null;
+  /** Tekla Common — local/story elevations (mm after analyzer normalization) */
+  topElevation?: number | null;
+  bottomElevation?: number | null;
 }
 
 /** Flattened bolt / mechanical fastener row from Tekla Bolt Pset */

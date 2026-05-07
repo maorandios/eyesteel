@@ -8,6 +8,14 @@ import type {
   AnalyzerIndexedEntity,
   AnalyzerPart,
 } from "@/types/domain";
+import {
+  formatCount,
+  formatElevationMm,
+  formatKgPlain,
+  formatMmPlain,
+  formatQuantityInt,
+} from "@/lib/format-numbers";
+import { countAssemblyOccurrencesInModel } from "@/lib/viewer/modelAggregates";
 import { isAnalyzerBoltRow } from "@/types/domain";
 
 const EM_DASH = "—";
@@ -27,7 +35,7 @@ export function displayPartMark(p: AnalyzerPart): string {
   if (pm) return pm;
   const tag = p.tag?.trim();
   if (tag && !looksLikeGeneratedIdTag(tag)) return tag;
-  return p.expressId != null ? `#${p.expressId}` : EM_DASH;
+  return p.expressId != null ? `#${formatCount(p.expressId)}` : EM_DASH;
 }
 
 /** Natural alphanumeric sort for מספר חלק (e.g. a1, a2, b12, b43, p6). */
@@ -35,35 +43,32 @@ export function comparePartMarksForSort(a: string, b: string): number {
   return a.localeCompare(b, "en", { numeric: true, sensitivity: "base" });
 }
 
-/** Analyzer stores elevations in mm; display signed metric value with 2 fractional digits (no unit suffix). */
-function formatElevationMm(mm: number | null | undefined): string {
-  if (mm == null || Number.isNaN(mm)) return EM_DASH;
-  const absVal = Math.abs(mm);
-  if (absVal < 1e-9) {
-    return "+0.00";
+/**
+ * How many steel parts in the full model match this piece (same bucket as חלקים שייכים merge):
+ * מספר חלק + פרופיל גולמי + שם חלק + משקל.
+ */
+export function countSteelPartsMatchingIdentity(
+  selected: AnalyzerPart,
+  allSteelParts: AnalyzerPart[],
+): number {
+  const mark = displayPartMark(selected);
+  const profileKey = (selected.profile || "").trim().toLowerCase();
+  const nameKey = (selected.name || "").trim().toLowerCase();
+  const wKey =
+    selected.weightKg != null && !Number.isNaN(selected.weightKg)
+      ? selected.weightKg.toFixed(4)
+      : "";
+
+  let n = 0;
+  for (const p of allSteelParts) {
+    if (displayPartMark(p) !== mark) continue;
+    if ((p.profile || "").trim().toLowerCase() !== profileKey) continue;
+    if ((p.name || "").trim().toLowerCase() !== nameKey) continue;
+    const pw = p.weightKg != null && !Number.isNaN(p.weightKg) ? p.weightKg.toFixed(4) : "";
+    if (pw !== wKey) continue;
+    n += 1;
   }
-  const body = absVal.toFixed(2);
-  const sign = mm > 0 ? "+" : "-";
-  return `${sign}${body}`;
-}
-
-/** Numeric kg only — unit belongs in the row/column label. */
-export function formatKgPlain(kg: number | null | undefined): string {
-  if (kg == null || Number.isNaN(kg)) return EM_DASH;
-  return kg >= 100 ? kg.toFixed(0) : kg.toFixed(2);
-}
-
-/** Numeric mm only — unit belongs in the row/column label. */
-function formatMmPlain(mm: number | null | undefined): string {
-  if (mm == null || Number.isNaN(mm)) return EM_DASH;
-  return mm.toFixed(2);
-}
-
-function formatQuantityInt(q: number | null | undefined): string {
-  if (q == null || Number.isNaN(q)) return EM_DASH;
-  const rounded = Math.round(q);
-  if (Math.abs(q - rounded) < 1e-6) return String(rounded);
-  return String(q);
+  return n;
 }
 
 /** שם חלק — ללא שם when missing or IFC "Unnamed". */
@@ -159,6 +164,92 @@ function aggregateNonBoltParts(parts: AnalyzerPart[]): {
   });
 }
 
+/** טבלת חלקים במודל: מאחד שורות זהות (מספר חלק / פרופיל / שם / משקל), משקל = סכום; מיון עולה לפי מספר חלק. */
+export function aggregateSteelPartsForModelTab(parts: AnalyzerPart[]): {
+  key: string;
+  displayMark: string;
+  displayProfile: string;
+  effectiveQty: number;
+  totalWeightKg: number | null;
+  instances: AnalyzerPart[];
+}[] {
+  const rows = aggregateNonBoltParts(parts).map((row) => {
+    let sumKg = 0;
+    let anyW = false;
+    for (const p of row.instances) {
+      if (p.weightKg != null && !Number.isNaN(p.weightKg)) {
+        sumKg += p.weightKg;
+        anyW = true;
+      }
+    }
+    return {
+      key: row.key,
+      displayMark: row.displayMark,
+      displayProfile: row.displayProfile,
+      effectiveQty: row.effectiveQty,
+      totalWeightKg: anyW ? sumKg : null,
+      instances: row.instances,
+    };
+  });
+  rows.sort((a, b) => comparePartMarksForSort(a.displayMark, b.displayMark));
+  return rows;
+}
+
+function ifcSteelEntityQtyContribution(p: AnalyzerPart): number {
+  const q = p.quantity;
+  if (q != null && !Number.isNaN(q) && q > 0) return Math.round(q);
+  return 1;
+}
+
+export type AggregatedProfileTabRow = {
+  key: string;
+  profileLabel: string;
+  totalQty: number;
+  totalWeightKg: number | null;
+  instances: AnalyzerPart[];
+};
+
+/** טבלת פרופילים במודל: לפי שם פרופיל (כמו בעמודת פרופיל), כמות = סכום יחידות, משקל = סכום; מיון עולה. */
+export function aggregateProfilesForModelTab(parts: AnalyzerPart[]): AggregatedProfileTabRow[] {
+  const bucket = new Map<string, { profileLabel: string; instances: AnalyzerPart[] }>();
+
+  for (const p of parts) {
+    const profileLabel = displayPartProfileCell(p);
+    const key = profileLabel.toLowerCase();
+    const prev = bucket.get(key);
+    if (prev) {
+      prev.instances.push(p);
+    } else {
+      bucket.set(key, { profileLabel, instances: [p] });
+    }
+  }
+
+  const rows = Array.from(bucket.entries()).map(([key, v]) => {
+    let totalQty = 0;
+    let sumKg = 0;
+    let anyW = false;
+    for (const p of v.instances) {
+      totalQty += ifcSteelEntityQtyContribution(p);
+      if (p.weightKg != null && !Number.isNaN(p.weightKg)) {
+        sumKg += p.weightKg;
+        anyW = true;
+      }
+    }
+    return {
+      key,
+      profileLabel: v.profileLabel,
+      totalQty,
+      totalWeightKg: anyW ? sumKg : null,
+      instances: v.instances,
+    };
+  });
+
+  rows.sort((a, b) =>
+    a.profileLabel.localeCompare(b.profileLabel, "en", { numeric: true, sensitivity: "base" }),
+  );
+  return rows;
+}
+
 /** IFC rows that share the same bolt type → one row; כמות = sum of boltQty (or 1 per row if missing). */
 function aggregateBoltRows(bolts: AnalyzerBoltRow[]): {
   key: string;
@@ -230,10 +321,13 @@ function KeyValueList({
 
 export function AssemblyPickDetailPanel({
   assembly,
+  allAssemblies,
   onSelectPartInstances,
   onBackToList,
 }: {
   assembly: AnalyzerAssembly;
+  /** Full assembly list from analyzer — כמות במודל uses same grouping as טבלת הרכבות */
+  allAssemblies?: AnalyzerAssembly[];
   onSelectPartInstances: (instances: AnalyzerPart[]) => void;
   onBackToList: () => void;
 }) {
@@ -252,13 +346,23 @@ export function AssemblyPickDetailPanel({
     );
   }, [assembly.parts]);
 
+  const occurrencesInModel = useMemo(
+    () =>
+      allAssemblies?.length
+        ? countAssemblyOccurrencesInModel(assembly, allAssemblies)
+        : 1,
+    [assembly, allAssemblies],
+  );
+
+  const partCountInAssembly = assembly.parts.length;
+
   const rows = [
     { label: "מספר אסמבלי", value: assembly.assemblyMark || EM_DASH },
     { label: "שם אסמבלי", value: assembly.name || assembly.tag || EM_DASH },
     { label: 'משקל כולל (ק״ג)', value: <span dir="ltr">{formatKgPlain(assembly.weightKg)}</span> },
     { label: "גובה עליון", value: <span dir="ltr">{formatElevationMm(assembly.topElevation)}</span> },
     { label: "גובה תחתון", value: <span dir="ltr">{formatElevationMm(assembly.bottomElevation)}</span> },
-    { label: "כמות חלקים", value: String(assembly.parts.length) },
+    { label: "כמות במודל", value: formatCount(occurrencesInModel) },
   ];
 
   return (
@@ -277,7 +381,7 @@ export function AssemblyPickDetailPanel({
 
       <section>
         <h3 className="mb-2 border-b border-zinc-700 pb-1.5 text-xs font-semibold text-zinc-300">
-          חלקים שייכים
+          חלקים שייכים · {formatCount(partCountInAssembly)}
         </h3>
         <div className="overflow-x-auto rounded-lg border border-zinc-800">
           <table className="w-full text-xs">
@@ -309,7 +413,7 @@ export function AssemblyPickDetailPanel({
                   <td className="whitespace-nowrap px-2.5 py-2.5 text-zinc-300">
                     <span dir="ltr">{formatKgPlain(row.weightKg)}</span>
                   </td>
-                  <td className="px-2.5 py-2.5 text-zinc-300">{String(row.effectiveQty)}</td>
+                  <td className="px-2.5 py-2.5 text-zinc-300">{formatQuantityInt(row.effectiveQty)}</td>
                 </tr>
               ))}
             </tbody>
@@ -371,11 +475,102 @@ export function AssemblyPickDetailPanel({
   );
 }
 
+/** Drill-down from פרופילים tab — one row per IFC steel part (no merge). */
+export function ProfileGroupPickDetailPanel({
+  profileLabel,
+  instances,
+  onBackToList,
+  onPickPart,
+}: {
+  profileLabel: string;
+  instances: AnalyzerPart[];
+  onBackToList: () => void;
+  onPickPart: (part: AnalyzerPart) => void;
+}) {
+  const sorted = useMemo(
+    () =>
+      [...instances].sort((a, b) =>
+        comparePartMarksForSort(displayPartMark(a), displayPartMark(b)),
+      ),
+    [instances],
+  );
+
+  const titleProfile =
+    profileLabel === "ללא שם" ? (
+      profileLabel
+    ) : (
+      <span dir="ltr" className="inline-block">
+        {profileLabel}
+      </span>
+    );
+
+  return (
+    <div className="space-y-5" dir="rtl">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] text-zinc-500">פרופיל נבחר</p>
+          <p className="text-sm font-semibold text-zinc-100">{titleProfile}</p>
+          <p className="mt-0.5 text-[11px] text-zinc-500">{formatCount(sorted.length)} חלקים במודל</p>
+        </div>
+        <Button variant="secondary" className="h-8 shrink-0 px-3 text-xs" onClick={onBackToList}>
+          חזרה לרשימה
+        </Button>
+      </div>
+
+      <section>
+        <h3 className="mb-2 border-b border-zinc-700 pb-1.5 text-xs font-semibold text-zinc-300">
+          חלקים
+        </h3>
+        <div className="overflow-x-auto rounded-lg border border-zinc-800">
+          <table className="w-full text-xs">
+            <thead className="bg-zinc-900 text-[11px] text-zinc-400">
+              <tr>
+                <th className="px-2.5 py-2.5 text-right font-medium">מספר חלק</th>
+                <th className="px-2.5 py-2.5 text-right font-medium">שם הפרופיל</th>
+                <th className="px-2.5 py-2.5 text-right font-medium">משקל (ק״ג)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800 bg-zinc-950/40">
+              {sorted.map((p) => {
+                const prof = displayPartProfileCell(p);
+                return (
+                  <tr
+                    key={p.id}
+                    className="cursor-pointer transition-colors hover:bg-zinc-800/80"
+                    onClick={() => onPickPart(p)}
+                  >
+                    <td className="px-2.5 py-2.5 font-medium text-zinc-100">{displayPartMark(p)}</td>
+                    <td className="px-2.5 py-2.5 text-zinc-300">
+                      {prof === "ללא שם" ? (
+                        prof
+                      ) : (
+                        <span dir="ltr" className="inline-block text-right">
+                          {prof}
+                        </span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-2.5 py-2.5 text-zinc-300">
+                      <span dir="ltr">{formatKgPlain(p.weightKg)}</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function PartPickDetailPanel({
   entity,
+  allSteelParts,
   onBackToList,
 }: {
   entity: AnalyzerIndexedEntity;
+  /** All non-bolt parts from analyzer output — used for model-wide כמות count */
+  allSteelParts?: AnalyzerPart[];
   onBackToList: () => void;
 }) {
   if (isAnalyzerBoltRow(entity)) {
@@ -407,42 +602,59 @@ export function PartPickDetailPanel({
 
   const part = entity as AnalyzerPart;
   const title = displayPartMark(part);
-  const rows = [
+  const profileEl =
+    displayPartProfileCell(part) === "ללא שם" ? (
+      "ללא שם"
+    ) : (
+      <span dir="ltr">{displayPartProfileCell(part)}</span>
+    );
+
+  const modelCount =
+    allSteelParts && allSteelParts.length > 0 ? countSteelPartsMatchingIdentity(part, allSteelParts) : null;
+
+  const generalRows = [
     { label: "מספר חלק", value: displayPartMark(part) },
+    { label: "פרופיל", value: profileEl },
     { label: "שם חלק", value: displayPartIfcName(part) },
-    { label: "סוג IFC", value: part.ifcType || EM_DASH },
-    {
-      label: "פרופיל",
-      value:
-        displayPartProfileCell(part) === "ללא שם" ? (
-          "ללא שם"
-        ) : (
-          <span dir="ltr">{displayPartProfileCell(part)}</span>
-        ),
-    },
     { label: "חומר", value: part.material || EM_DASH },
+    {
+      label: "כמות",
+      value: modelCount != null ? formatCount(modelCount) : EM_DASH,
+    },
+    {
+      label: "גובה עליון",
+      value: <span dir="ltr">{formatElevationMm(part.topElevation ?? null)}</span>,
+    },
+    {
+      label: "גובה תחתון",
+      value: <span dir="ltr">{formatElevationMm(part.bottomElevation ?? null)}</span>,
+    },
+  ];
+
+  const technicalRows = [
     { label: 'משקל (ק״ג)', value: <span dir="ltr">{formatKgPlain(part.weightKg)}</span> },
-    { label: "כמות", value: formatQuantityInt(part.quantity) },
     {
       label: "אורך (מ״מ)",
       value: <span dir="ltr">{formatMmPlain(part.lengthMm)}</span>,
     },
     {
-      label: "עובי (מ״מ)",
-      value: <span dir="ltr">{formatMmPlain(part.thickness)}</span>,
+      label: "גובה (מ״מ)",
+      value: <span dir="ltr">{formatMmPlain(part.yDim)}</span>,
     },
     {
-      label: "מידות X / Y (מ״מ)",
-      value:
-        part.xDim != null || part.yDim != null ? (
-          <span dir="ltr">
-            {part.xDim != null && !Number.isNaN(part.xDim) ? part.xDim.toFixed(2) : EM_DASH} ×{" "}
-            {part.yDim != null && !Number.isNaN(part.yDim) ? part.yDim.toFixed(2) : EM_DASH}
-          </span>
-        ) : (
-          EM_DASH
-        ),
+      label: "רוחב (מ״מ)",
+      value: <span dir="ltr">{formatMmPlain(part.xDim)}</span>,
     },
+    ...(part.wallThicknessMm != null &&
+    !Number.isNaN(part.wallThicknessMm) &&
+    Math.abs(part.wallThicknessMm) > 1e-9
+      ? [
+          {
+            label: "עובי דופן (מ״מ)",
+            value: <span dir="ltr">{formatMmPlain(part.wallThicknessMm)}</span>,
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -457,7 +669,12 @@ export function PartPickDetailPanel({
         </Button>
       </div>
 
-      <KeyValueList title="נתונים כלליים" rows={rows} />
+      <KeyValueList title="נתונים כלליים" rows={generalRows} />
+      <p className="mt-2 text-[11px] leading-snug text-zinc-500">
+        כמות = מספר פריטים זהים במודל כולו (מספר חלק, פרופיל, שם חלק ומשקל)
+      </p>
+
+      <KeyValueList title="נתונים טכניים" rows={technicalRows} />
     </div>
   );
 }

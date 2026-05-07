@@ -1,6 +1,7 @@
 "use client";
 
 import { Card } from "@/components/ui/card";
+import { formatCount, formatKgPlain } from "@/lib/format-numbers";
 import type { AnalyzerOutput, Element } from "@/types/domain";
 
 export function ManagementPanel({
@@ -28,15 +29,18 @@ export function ManagementPanel({
     <div className="space-y-2">
       <Card>
         <p className="text-sm font-semibold">סיכום מודל</p>
-        <p className="text-xs text-zinc-400">הרכבות: {analyzerData.assemblies.length}</p>
-        <p className="text-xs text-zinc-400">חלקים: {analyzerData.parts.length}</p>
+        <p className="text-xs text-zinc-400">הרכבות: {formatCount(analyzerData.assemblies.length)}</p>
+        <p className="text-xs text-zinc-400">חלקים: {formatCount(analyzerData.parts.length)}</p>
       </Card>
       {analyzerData.assemblies.slice(0, 8).map((assembly) => (
         <Card key={assembly.id} className="space-y-1">
           <p className="text-sm font-semibold">{assembly.assemblyMark || "ללא סימון"}</p>
           <p className="text-xs text-zinc-400">{assembly.name || "ללא שם הרכבה"}</p>
-          <p className="text-xs text-zinc-400">כמות חלקים: {assembly.parts.length}</p>
-          <p className="text-xs text-zinc-500">משקל: {assembly.weightKg ?? "-"}</p>
+          <p className="text-xs text-zinc-400">כמות חלקים: {formatCount(assembly.parts.length)}</p>
+          <p className="text-xs text-zinc-500">
+            משקל:{" "}
+            <span dir="ltr">{formatKgPlain(assembly.weightKg ?? null)}</span>
+          </p>
         </Card>
       ))}
     </div>
