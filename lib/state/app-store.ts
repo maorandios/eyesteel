@@ -13,6 +13,7 @@ interface AppState {
   activeSheet: "none" | "search" | "layers" | "details" | "parts";
   categoryVisibility: Record<string, boolean>;
   transparencyEnabled: boolean;
+  sketchModeEnabled: boolean;
   analyzerData: AnalyzerOutput | null;
   setFile: (file: File | null) => void;
   setAnalyzerData: (data: AnalyzerOutput | null) => void;
@@ -23,6 +24,7 @@ interface AppState {
   setActiveSheet: (sheet: AppState["activeSheet"]) => void;
   toggleCategory: (category: string) => void;
   setTransparencyEnabled: (enabled: boolean) => void;
+  toggleSketchMode: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -42,12 +44,14 @@ export const useAppStore = create<AppState>((set) => ({
     other: true,
   },
   transparencyEnabled: false,
+  sketchModeEnabled: false,
   analyzerData: null,
   setFile: (file) =>
     set({
       file,
       fileName: file?.name ?? "",
       loadingState: file ? "loading" : "idle",
+      ...(file ? {} : { sketchModeEnabled: false }),
     }),
   setAnalyzerData: (analyzerData) => set({ analyzerData }),
   setLoadingState: (loadingState) => set({ loadingState }),
@@ -63,4 +67,6 @@ export const useAppStore = create<AppState>((set) => ({
       },
     })),
   setTransparencyEnabled: (transparencyEnabled) => set({ transparencyEnabled }),
+  toggleSketchMode: () =>
+    set((state) => ({ sketchModeEnabled: !state.sketchModeEnabled })),
 }));

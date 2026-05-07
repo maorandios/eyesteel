@@ -4,16 +4,25 @@ import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as OBF from "@thatopen/components-front";
 import CameraControls from "camera-controls";
-import { LodMode } from "@thatopen/fragments";
+import { LodMode, type FragmentsModel } from "@thatopen/fragments";
 import type { ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
 import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
 import {
+  EYE_STEEL_SCENE_BACKGROUND_HEX,
   SELECTION_HIGHLIGHT_COLOR,
   applyEyeSteelRendererDefaults,
   applyEyeSteelSceneBackdrop,
   createEyeSteelLights,
 } from "@/lib/viewer/visual-policy";
+import {
+  attachSketchEdges,
+  createSketchFillMaterial,
+  createSketchLineMaterial,
+  isLodFragmentMaterial,
+  SKETCH_EDGE_CHILD_NAME,
+  stripSketchEdgeChildren,
+} from "@/lib/viewer/sketch-mode";
 import {
   cameraUpForViewMode,
   eyePositionFromCenter,
@@ -75,6 +84,17 @@ export class ViewerEngine {
   private activeOrthoViewMode: ViewModeId | null = null;
   private orthoResizeHandler: (() => void) | null = null;
   private readonly tmpVecEye = new THREE.Vector3();
+
+  private sketchModeEnabled = false;
+  private sketchEdgesBuilt = false;
+  private sketchFillMaterial: THREE.MeshBasicMaterial | null = null;
+  private sketchLineMaterial: THREE.LineBasicMaterial | null = null;
+  private readonly sketchMaterialBackup = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
+  /** Fragments {@link LodMaterial} instances — restore `lodOpacity` when exiting sketch. */
+  private readonly sketchLodOpacityBackup = new Map<THREE.Material, number>();
+  private readonly sceneBackdropDefault = new THREE.Color(EYE_STEEL_SCENE_BACKGROUND_HEX);
+  /** Tiles mount asynchronously after load — rebuild sketch cache when meshes appear. */
+  private sketchTilesUnsub: (() => void) | null = null;
 
   constructor(container: HTMLDivElement) {
     this.container = container;
@@ -435,8 +455,165 @@ export class ViewerEngine {
     });
   }
 
+  /**
+   * Cached outlines once per {@link loadFile}. IFC fragments render via {@link LodMaterial};
+   * we hide faces with `lodOpacity = 0` (replacing `mesh.material` is overwritten by the worker).
+   */
+  private rebuildSketchModeCache(): void {
+    if (this.disposed || !this.modelObject) return;
+
+    stripSketchEdgeChildren(this.modelObject);
+    this.sketchMaterialBackup.clear();
+    this.sketchLodOpacityBackup.clear();
+    if (this.sketchFillMaterial) {
+      this.sketchFillMaterial.dispose();
+      this.sketchFillMaterial = null;
+    }
+    if (this.sketchLineMaterial) {
+      this.sketchLineMaterial.dispose();
+      this.sketchLineMaterial = null;
+    }
+
+    this.sketchFillMaterial = createSketchFillMaterial();
+    this.sketchLineMaterial = createSketchLineMaterial();
+
+    this.modelObject.traverse((obj) => {
+      const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
+      if (!mesh.isMesh || mesh.isInstancedMesh) return;
+      const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+      if (!geom?.attributes.position || geom.getAttribute("position").count < 3) return;
+      if (!mesh.material) return;
+      this.sketchMaterialBackup.set(mesh, mesh.material);
+    });
+
+    attachSketchEdges(this.modelObject, this.sketchLineMaterial);
+    const hadMeshes = this.sketchMaterialBackup.size > 0;
+    this.sketchEdgesBuilt = hadMeshes;
+
+    if (hadMeshes) {
+      if (this.sketchModeEnabled) this.applySketchModeVisuals(true);
+      else this.applySketchModeVisuals(false);
+    }
+  }
+
+  private detachSketchTilesListener() {
+    this.sketchTilesUnsub?.();
+    this.sketchTilesUnsub = null;
+  }
+
+  /**
+   * Fragment tiles are pushed onto `model.object` asynchronously (`tiles.onItemSet`).
+   * Without this, the first sketch rebuild sees zero meshes and sketch mode never activates.
+   */
+  private attachSketchRebuildWhenTilesReady(fragModel: FragmentsModel) {
+    this.detachSketchTilesListener();
+
+    let attempts = 0;
+    const onViewUpdated = (_m: FragmentsModel) => {
+      if (this.disposed || attempts++ > 80) {
+        fragModel.onViewUpdated.remove(onViewUpdated);
+        this.sketchTilesUnsub = null;
+        return;
+      }
+      if (this.sketchEdgesBuilt) {
+        fragModel.onViewUpdated.remove(onViewUpdated);
+        this.sketchTilesUnsub = null;
+        return;
+      }
+      this.rebuildSketchModeCache();
+      if (this.sketchEdgesBuilt) {
+        fragModel.onViewUpdated.remove(onViewUpdated);
+        this.sketchTilesUnsub = null;
+      }
+    };
+
+    fragModel.onViewUpdated.add(onViewUpdated);
+    this.sketchTilesUnsub = () => {
+      fragModel.onViewUpdated.remove(onViewUpdated);
+      this.sketchTilesUnsub = null;
+    };
+  }
+
+  private applySketchModeVisuals(enabled: boolean): void {
+    if (!this.modelObject) return;
+
+    if (enabled) {
+      const fill = this.sketchFillMaterial;
+      this.modelObject.traverse((obj) => {
+        const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
+        if (!mesh.isMesh || mesh.isInstancedMesh) return;
+        const orig = this.sketchMaterialBackup.get(mesh);
+        if (orig === undefined) return;
+
+        const origList = Array.isArray(orig) ? orig : [orig];
+        if (origList.length === 0) return;
+
+        if (origList.every(isLodFragmentMaterial)) {
+          for (const m of origList) {
+            if (!isLodFragmentMaterial(m)) continue;
+            const mat = m as THREE.Material & { lodOpacity: number };
+            if (!this.sketchLodOpacityBackup.has(m)) this.sketchLodOpacityBackup.set(m, mat.lodOpacity);
+            mat.lodOpacity = 0;
+          }
+        } else {
+          if (!fill) return;
+          mesh.material = Array.isArray(orig) ? origList.map(() => fill) : fill;
+        }
+      });
+
+      this.modelObject.traverse((obj) => {
+        for (const ch of obj.children) {
+          if (ch.name === SKETCH_EDGE_CHILD_NAME) ch.visible = true;
+        }
+      });
+    } else {
+      for (const [mat, opacity] of this.sketchLodOpacityBackup) {
+        (mat as THREE.Material & { lodOpacity: number }).lodOpacity = opacity;
+      }
+      this.sketchLodOpacityBackup.clear();
+
+      this.modelObject.traverse((obj) => {
+        const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
+        if (!mesh.isMesh || mesh.isInstancedMesh) return;
+        const orig = this.sketchMaterialBackup.get(mesh);
+        if (orig === undefined) return;
+        const origList = Array.isArray(orig) ? orig : [orig];
+        if (!origList.every(isLodFragmentMaterial)) mesh.material = orig;
+      });
+
+      this.modelObject.traverse((obj) => {
+        for (const ch of obj.children) {
+          if (ch.name === SKETCH_EDGE_CHILD_NAME) ch.visible = false;
+        }
+      });
+    }
+
+    const fragments = this.components.get(OBC.FragmentsManager);
+    if (fragments.initialized) void fragments.core.update(true);
+  }
+
+  /** Transparent solids + cached dark-gray edges; backdrop and lights unchanged. */
+  setSketchMode(enabled: boolean): void {
+    if (this.disposed) return;
+    if (this.sketchModeEnabled === enabled) return;
+    this.sketchModeEnabled = enabled;
+    if (!this.modelObject || !this.sketchEdgesBuilt) return;
+    this.applySketchModeVisuals(enabled);
+  }
+
+  /**
+   * Same as {@link setSketchMode} but skips the internal equality short‑circuit so UI toggles always apply.
+   */
+  setSketchModeFromUI(enabled: boolean): void {
+    if (this.disposed) return;
+    this.sketchModeEnabled = enabled;
+    if (!this.modelObject || !this.sketchEdgesBuilt) return;
+    this.applySketchModeVisuals(enabled);
+  }
+
   async loadFile(file: File) {
     if (this.disposed) return;
+    this.detachSketchTilesListener();
     if (this.activeOrthoViewMode !== null) this.exitViewMode();
     this.measurementController.clearAll();
     const { model } = await loadIfcModel(this.components, file);
@@ -446,7 +623,21 @@ export class ViewerEngine {
       object: THREE.Object3D;
       useCamera: (cam: THREE.PerspectiveCamera | THREE.OrthographicCamera) => void;
     };
-    if (this.modelObject) this.world.scene.three.remove(this.modelObject);
+    if (this.modelObject) {
+      stripSketchEdgeChildren(this.modelObject);
+      this.sketchMaterialBackup.clear();
+      this.sketchLodOpacityBackup.clear();
+      if (this.sketchFillMaterial) {
+        this.sketchFillMaterial.dispose();
+        this.sketchFillMaterial = null;
+      }
+      if (this.sketchLineMaterial) {
+        this.sketchLineMaterial.dispose();
+        this.sketchLineMaterial = null;
+      }
+      this.sketchEdgesBuilt = false;
+      this.world.scene.three.remove(this.modelObject);
+    }
     this.modelObject = casted.object;
     this.modelId = casted.modelId;
     this.world.scene.three.add(casted.object);
@@ -459,11 +650,16 @@ export class ViewerEngine {
     void fragments.core.update(true);
 
     const fragModel = fragments.list.get(casted.modelId);
-    if (fragModel) await fragModel.setLodMode(LodMode.ALL_VISIBLE);
+    if (fragModel) {
+      await fragModel.setLodMode(LodMode.ALL_VISIBLE);
+      this.attachSketchRebuildWhenTilesReady(fragModel);
+    }
 
     this.applyPerspectiveClipPlanes(casted.object);
 
     this.tuneReadableSteelMaterials(casted.object);
+
+    this.rebuildSketchModeCache();
 
     this.syncFragmentsClippingPlanesBridge();
     this.fitAll();
@@ -846,6 +1042,7 @@ export class ViewerEngine {
   setTransparency(enabled: boolean) {
     if (this.disposed) return;
     if (!this.modelObject) return;
+    if (this.sketchModeEnabled) return;
     this.modelObject.traverse((child: THREE.Object3D) => {
       const mesh = child as THREE.Mesh;
       const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
@@ -902,6 +1099,7 @@ export class ViewerEngine {
       }
       this.viewerTool = "none";
       this.measurementController.shutdown();
+      this.detachSketchTilesListener();
       if (this.activeOrthoViewMode !== null) {
         this.detachOrthoResizeListener();
         this.activeOrthoViewMode = null;
@@ -918,6 +1116,23 @@ export class ViewerEngine {
         if (this.boundUseCamera) this.boundUseCamera(this.perspectiveCamera);
         const fragments = this.components.get(OBC.FragmentsManager);
         if (fragments.initialized) void fragments.core.update(true);
+      }
+      if (this.modelObject) {
+        stripSketchEdgeChildren(this.modelObject);
+      }
+      for (const [mat, opacity] of this.sketchLodOpacityBackup) {
+        (mat as THREE.Material & { lodOpacity: number }).lodOpacity = opacity;
+      }
+      this.sketchLodOpacityBackup.clear();
+      this.sketchFillMaterial?.dispose();
+      this.sketchLineMaterial?.dispose();
+      this.sketchFillMaterial = null;
+      this.sketchLineMaterial = null;
+      this.sketchMaterialBackup.clear();
+      this.sketchEdgesBuilt = false;
+      (this.world.scene.three as THREE.Scene).background = this.sceneBackdropDefault;
+      for (const L of this.viewerLights) {
+        L.visible = true;
       }
       for (const light of this.viewerLights) {
         this.world.scene.three.remove(light);

@@ -39,10 +39,13 @@ export function createEyeSteelLights(scene: THREE.Object3D): THREE.Light[] {
   return [hemi, key, fill];
 }
 
+/** Default viewer backdrop (also restored when exiting sketch mode). */
+export const EYE_STEEL_SCENE_BACKGROUND_HEX = 0xe8ecef;
+
 /** Very slight cool backdrop so profiles separate from void without fog/AO. */
 export function applyEyeSteelSceneBackdrop(sceneRoot: THREE.Object3D): void {
   const scene = sceneRoot as THREE.Scene;
-  scene.background = new THREE.Color(0xe8ecef);
+  scene.background = new THREE.Color(EYE_STEEL_SCENE_BACKGROUND_HEX);
 }
 
 /** Warm industrial accent for fragment GPU highlight (That Open only draws selection). */

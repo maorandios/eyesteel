@@ -62,6 +62,8 @@ export default function ViewerPage() {
     setLoadingState,
     loadingState,
     transparencyEnabled,
+    sketchModeEnabled,
+    toggleSketchMode,
   } = useAppStore();
 
   const viewerTool = useViewerToolStore((s) => s.activeTool);
@@ -87,6 +89,7 @@ export default function ViewerPage() {
   useEffect(() => {
     if (!engine || !file) return;
     clearViewModeStore();
+    useAppStore.setState({ sketchModeEnabled: false });
     setLoadingState("parsing");
     engine
       .loadFile(file)
@@ -113,6 +116,17 @@ export default function ViewerPage() {
     if (!engine) return;
     engine.setTransparency(transparencyEnabled);
   }, [engine, transparencyEnabled]);
+
+  useEffect(() => {
+    if (!engine) return;
+    engine.setSketchModeFromUI(sketchModeEnabled);
+  }, [engine, sketchModeEnabled]);
+
+  const handleSketchToggle = useCallback(() => {
+    toggleSketchMode();
+    const enabled = useAppStore.getState().sketchModeEnabled;
+    engine?.setSketchModeFromUI(enabled);
+  }, [engine, toggleSketchMode]);
 
   const onReady = useCallback((instance: ViewerEngine | null) => setEngine(instance), []);
   const modeLabel = modeConfig[mode].label;
@@ -430,6 +444,9 @@ export default function ViewerPage() {
         viewModeDisabled={
           viewerTool === "measurement" || loadingState !== "ready"
         }
+        sketchModeActive={sketchModeEnabled}
+        onSketchToggle={handleSketchToggle}
+        sketchDisabled={loadingState !== "ready"}
       />
 
       {viewMode !== "none" && (

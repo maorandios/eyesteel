@@ -22,6 +22,9 @@ interface Props {
   onMeasurementFinish: () => void;
   onApplyViewMode: (mode: ViewModeId) => void;
   viewModeDisabled?: boolean;
+  sketchModeActive: boolean;
+  onSketchToggle: () => void;
+  sketchDisabled?: boolean;
 }
 
 /**
@@ -37,6 +40,9 @@ export function ViewerBottomDock({
   onMeasurementFinish,
   onApplyViewMode,
   viewModeDisabled = false,
+  sketchModeActive,
+  onSketchToggle,
+  sketchDisabled = false,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -80,7 +86,7 @@ export function ViewerBottomDock({
       <div
         className={cn(
           "pointer-events-auto flex items-center gap-1 rounded-2xl border border-zinc-600 bg-zinc-950/95 px-2 py-2 shadow-2xl backdrop-blur-sm transition-[width] duration-200",
-          measurementActive ? "max-w-[min(100vw-1rem,28rem)]" : "max-w-[min(100vw-1rem,18rem)]",
+          measurementActive ? "max-w-[min(100vw-1rem,28rem)]" : "max-w-[min(100vw-1rem,24rem)]",
         )}
         dir="rtl"
       >
@@ -163,6 +169,20 @@ export function ViewerBottomDock({
             </div>
           )}
         </div>
+
+        <Button
+          type="button"
+          variant={sketchModeActive ? "default" : "secondary"}
+          className={cn(
+            "h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm",
+            sketchModeActive && "ring-2 ring-zinc-400/90 ring-offset-2 ring-offset-zinc-950",
+          )}
+          aria-pressed={sketchModeActive}
+          disabled={sketchDisabled}
+          onClick={onSketchToggle}
+        >
+          מצב סקיצה
+        </Button>
 
         <Button
           type="button"
