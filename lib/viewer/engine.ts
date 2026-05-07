@@ -2,6 +2,7 @@
 
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
+import CameraControls from "camera-controls";
 import { LodMode } from "@thatopen/fragments";
 import type { ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
@@ -27,7 +28,9 @@ export class ViewerEngine {
   private readonly viewerLights: THREE.Light[] = [];
 
   private pointerDownHandler: ((event: PointerEvent) => void) | null = null;
+  private pointerMoveHandler: ((event: PointerEvent) => void) | null = null;
   private pointerUpHandler: ((event: PointerEvent) => void) | null = null;
+  private readonly lastPointerNdc = new THREE.Vector2(0, 0);
   private downPos: { x: number; y: number; t: number } | null = null;
   private pickCallback: ((hit: PickHit) => void) | null = null;
   private fragmentCameraHooksInstalled = false;
@@ -51,6 +54,7 @@ export class ViewerEngine {
     this.applySnappyCameraControls();
     this.applyPerspectiveClipPlanes();
     this.installFragmentCameraSyncOnce();
+    this.installOrbitPivotOnRotateStart();
 
     const scene = this.world.scene.three as THREE.Scene;
     applyEyeSteelSceneBackdrop(scene);
@@ -88,6 +92,41 @@ export class ViewerEngine {
     if (!c) return;
     c.smoothTime = 0;
     c.draggingSmoothTime = 0;
+    /**
+     * Defaults are minDistance=6 + infinityDolly=true so dollying inside minDistance pushes the orbit target —
+     * the pivot slides away from the steel you framed and orbit feels broken.
+     */
+    c.minDistance = 0.05;
+    c.infinityDolly = false;
+  }
+
+  /** Rotate gestures orbit around the surface point under the cursor (desktop + touch). */
+  private installOrbitPivotOnRotateStart() {
+    const controls = this.world.camera.controls;
+    if (!controls) return;
+    const onRotateStart = () => {
+      const action = controls.currentAction;
+      const A = CameraControls.ACTION;
+      const isRotate =
+        action === A.ROTATE ||
+        action === A.TOUCH_ROTATE ||
+        action === A.TOUCH_DOLLY_ROTATE ||
+        action === A.TOUCH_ZOOM_ROTATE;
+      if (!isRotate) return;
+      const fragments = this.components.get(OBC.FragmentsManager);
+      if (!fragments.initialized || this.disposed) return;
+      void (async () => {
+        try {
+          const pickers = this.components.get(OBC.FastModelPickers);
+          const picker = pickers.get(this.world);
+          const pt = await picker.getPointAt(this.lastPointerNdc.clone());
+          if (pt && !this.disposed) controls.setOrbitPoint(pt.x, pt.y, pt.z);
+        } catch {
+          /* picker GPU passes may fail transiently */
+        }
+      })();
+    };
+    controls.addEventListener("controlstart", onRotateStart);
   }
 
   private installFragmentCameraSyncOnce() {
@@ -168,7 +207,19 @@ export class ViewerEngine {
     const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
     if (!canvas) return;
 
+    const syncNdc = (event: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      this.lastPointerNdc.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+    };
+
+    this.pointerMoveHandler = (event: PointerEvent) => syncNdc(event);
+
     this.pointerDownHandler = (event: PointerEvent) => {
+      syncNdc(event);
       if (event.button !== 0 && event.pointerType === "mouse") return;
       this.downPos = { x: event.clientX, y: event.clientY, t: Date.now() };
     };
@@ -203,9 +254,11 @@ export class ViewerEngine {
       try {
         const pickers = this.components.get(OBC.FastModelPickers);
         const picker = pickers.get(this.world);
-        const result = await picker.getItemAt(mouse);
-        if (result && typeof result.localId === "number") {
-          hit = { localId: result.localId, itemId: result.itemId };
+        const full = await picker.getFullPick(mouse);
+        if (full && typeof full.localId === "number") {
+          hit = { localId: full.localId, itemId: full.itemId };
+          const c = this.world.camera.controls;
+          if (c) c.setOrbitPoint(full.point.x, full.point.y, full.point.z);
         }
       } catch (error) {
         console.error("[picker] gpu pick failed:", error);
@@ -221,6 +274,7 @@ export class ViewerEngine {
     };
 
     canvas.addEventListener("pointerdown", this.pointerDownHandler, true);
+    canvas.addEventListener("pointermove", this.pointerMoveHandler);
     canvas.addEventListener("pointerup", this.pointerUpHandler, true);
     window.addEventListener("pointerup", this.pointerUpHandler, true);
   }
@@ -230,11 +284,15 @@ export class ViewerEngine {
     if (this.pointerDownHandler) {
       canvas?.removeEventListener("pointerdown", this.pointerDownHandler, true);
     }
+    if (this.pointerMoveHandler) {
+      canvas?.removeEventListener("pointermove", this.pointerMoveHandler);
+    }
     if (this.pointerUpHandler) {
       canvas?.removeEventListener("pointerup", this.pointerUpHandler, true);
       window.removeEventListener("pointerup", this.pointerUpHandler, true);
     }
     this.pointerDownHandler = null;
+    this.pointerMoveHandler = null;
     this.pointerUpHandler = null;
     this.downPos = null;
     this.pickCallback = null;
@@ -286,7 +344,9 @@ export class ViewerEngine {
       const center = aggregate.getCenter(new THREE.Vector3());
       const size = aggregate.getSize(new THREE.Vector3()).length();
       const offset = Math.max(size, 5);
-      this.world.camera.controls?.setLookAt(
+      const ctrl = this.world.camera.controls;
+      ctrl?.setOrbitPoint(center.x, center.y, center.z);
+      ctrl?.setLookAt(
         center.x + offset,
         center.y + offset,
         center.z + offset,
@@ -339,7 +399,9 @@ export class ViewerEngine {
     this.applyPerspectiveClipPlanes(this.modelObject);
     const box = new THREE.Box3().setFromObject(this.modelObject);
     const center = box.getCenter(new THREE.Vector3());
-    this.world.camera.controls?.setTarget(center.x, center.y, center.z, false);
+    const ctrl = this.world.camera.controls;
+    ctrl?.setOrbitPoint(center.x, center.y, center.z);
+    ctrl?.setTarget(center.x, center.y, center.z, false);
   }
 
   dispose() {

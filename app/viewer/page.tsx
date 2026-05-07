@@ -156,7 +156,8 @@ export default function ViewerPage() {
   );
 
   const selectAssembly = useCallback(
-    async (assembly: AnalyzerAssembly | null) => {
+    async (assembly: AnalyzerAssembly | null, opts?: { focusCamera?: boolean }) => {
+      const focusCamera = opts?.focusCamera !== false;
       setProfileGroupDetail(null);
       setSelectedAssemblyId(assembly?.id ?? null);
       setSelectedPartId(null);
@@ -173,7 +174,7 @@ export default function ViewerPage() {
         .filter((n): n is number => typeof n === "number");
       const itemIds = [...steelIds, ...boltIds];
       await engine.highlightItemIds(itemIds);
-      await engine.focusItemIds(itemIds);
+      if (focusCamera) await engine.focusItemIds(itemIds);
       setActiveSheet("details");
       const boltCount = assembly.bolts?.length ?? 0;
       setSelectionStatus(
@@ -238,7 +239,11 @@ export default function ViewerPage() {
   );
 
   const selectPart = useCallback(
-    async (part: AnalyzerIndexedEntity | null, opts?: { preserveProfileGroup?: boolean }) => {
+    async (
+      part: AnalyzerIndexedEntity | null,
+      opts?: { preserveProfileGroup?: boolean; focusCamera?: boolean },
+    ) => {
+      const focusCamera = opts?.focusCamera !== false;
       if (part !== null && !opts?.preserveProfileGroup) {
         setProfileGroupDetail(null);
       }
@@ -251,7 +256,7 @@ export default function ViewerPage() {
       }
       const itemIds = part.expressId !== null ? [part.expressId] : [];
       await engine.highlightItemIds(itemIds);
-      await engine.focusItemIds(itemIds);
+      if (focusCamera) await engine.focusItemIds(itemIds);
       setActiveSheet("details");
       setSelectionStatus(
         isAnalyzerBoltRow(part)
@@ -304,11 +309,11 @@ export default function ViewerPage() {
             (a.bolts ?? []).some((b) => b.id === part.id),
         );
         if (assembly) {
-          await selectAssembly(assembly);
+          await selectAssembly(assembly, { focusCamera: false });
           return;
         }
       }
-      await selectPart(part);
+      await selectPart(part, { focusCamera: false });
     });
     return () => engine.setPickCallback(null);
   }, [engine, analyzerData, selectionMode, selectAssembly, selectPart]);
