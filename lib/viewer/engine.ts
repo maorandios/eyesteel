@@ -35,6 +35,7 @@ import {
   type ViewerClippingUiSnapshot,
   normalForClippingDirection,
 } from "@/lib/viewer/clipping-presets";
+import type { IsolationMode } from "@/lib/state/isolation-store";
 
 export interface PickHit {
   localId: number;
@@ -51,6 +52,26 @@ const TAP_MAX_MS_TOUCH = 950;
 
 const ORTHO_MARGIN = 1.08;
 const ORTHO_DISTANCE_K = 1.75;
+
+/** Worker batch size for `setVisible` / `setOpacity` on large Tekla models (mobile-safe). */
+const ISOLATION_WORKER_CHUNK = 384;
+
+/** Non-selected opacity in context isolation (ghost geometry). */
+const CONTEXT_ISOLATION_GHOST_OPACITY = 0.09;
+
+const ISOLATION_DEBUG_PREFIX = "[eyeSteel:isolation]";
+const CONTEXT_GHOST_SNAPSHOT_NAME = "eyeSteel-context-ghost-snapshot";
+
+function isolationDebug(
+  step: string,
+  data?: Record<string, unknown>,
+): void {
+  if (data === undefined) {
+    console.log(ISOLATION_DEBUG_PREFIX, step);
+  } else {
+    console.log(ISOLATION_DEBUG_PREFIX, step, data);
+  }
+}
 
 export class ViewerEngine {
   private readonly container: HTMLDivElement;
@@ -114,6 +135,17 @@ export class ViewerEngine {
   /** Tiles mount asynchronously after load — rebuild sketch cache when meshes appear. */
   private sketchTilesUnsub: (() => void) | null = null;
 
+  /**
+   * Fragment isolation visual mode — when not `none`, {@link ViewerEngine.setTransparency} no-ops
+   * so mesh traversal does not fight ThatOpen LOD opacity overrides.
+   */
+  private isolationVisualMode: IsolationMode = "none";
+  private readonly contextOverlayMeshes: THREE.Mesh[] = [];
+  /**
+   * Serializes isolation RPCs + tile sync. Overlapping `applyIsolation` / `clearIsolationVisuals` (e.g. UI +
+   * selection effects) yields a visible "blink" then a stale view on the ThatOpen worker/main bridge.
+   */
+  private isolationChain: Promise<void> = Promise.resolve();
   constructor(container: HTMLDivElement) {
     this.container = container;
     this.components = new OBC.Components();
@@ -501,7 +533,22 @@ export class ViewerEngine {
     cameraComp.controls?.addEventListener("update", () => {
       const fragments = this.components.get(OBC.FragmentsManager);
       if (!fragments.initialized) return;
-      void fragments.core.update();
+      /* Default `core.update()` caps work at ~4ms; leftover tile batches look like flicker/reverts after isolation. */
+      void (async () => {
+        if (this.disposed) return;
+        if (this.isolationVisualMode === "context") {
+          /**
+           * Context opacity is highly sensitive to incremental tile UPDATE churn.
+           * We only force worker sync at explicit isolation steps/rest events.
+           */
+          return;
+        }
+        if (this.isolationVisualMode !== "none") {
+          await fragments.core.update(true);
+        } else {
+          void fragments.core.update();
+        }
+      })();
     });
     this.fragmentCameraHooksInstalled = true;
   }
@@ -576,7 +623,7 @@ export class ViewerEngine {
     this.detachSketchTilesListener();
 
     let attempts = 0;
-    const onViewUpdated = (_m: FragmentsModel) => {
+    const onViewUpdated = () => {
       if (this.disposed || attempts++ > 80) {
         fragModel.onViewUpdated.remove(onViewUpdated);
         this.sketchTilesUnsub = null;
@@ -751,6 +798,7 @@ export class ViewerEngine {
 
   async loadFile(file: File) {
     if (this.disposed) return;
+    await this.clearIsolationVisuals();
     this.clearClipping();
     this.detachSketchTilesListener();
     if (this.activeOrthoViewMode !== null) this.exitViewMode();
@@ -763,6 +811,7 @@ export class ViewerEngine {
       useCamera: (cam: THREE.PerspectiveCamera | THREE.OrthographicCamera) => void;
     };
     if (this.modelObject) {
+      this.clearContextMainThreadVisuals();
       stripSketchEdgeChildren(this.modelObject);
       this.sketchMaterialBackup.clear();
       this.sketchLodOpacityBackup.clear();
@@ -1281,57 +1330,143 @@ export class ViewerEngine {
     }
   }
 
-  async highlightAnalyzerSubset(entities: Iterable<{ id: string; expressId: number | null }>) {
-    if (!this.modelId) return;
-    const fragments = this.components.get(OBC.FragmentsManager);
-    const fragModel = fragments.list.get(this.modelId);
+  getIsolationVisualMode(): IsolationMode {
+    return this.isolationVisualMode;
+  }
 
-    await fragments.resetHighlight();
-    if (fragModel) await fragModel.resetOpacity(undefined);
+  /**
+   * Resolve analyzer highlight refs to ThatOpen fragment **local** ids (assemblies → all parts/bolts).
+   */
+  async resolveIsolationLocalIds(
+    refs: Iterable<{ id: string; expressId: number | null }>,
+  ): Promise<Set<number>> {
+    if (!this.modelId) return new Set();
+    const map = await this.modelIdMapForAnalyzerEntities(refs);
+    return new Set(map[this.modelId] ?? []);
+  }
 
-    const map = await this.modelIdMapForAnalyzerEntities(entities);
-    const ids = map[this.modelId];
-    if (!ids || ids.size === 0) {
-      void fragments.core.update(true);
-      return;
+  private bboxMapFromLocalSet(selected: Set<number>): Record<string, Set<number>> {
+    if (!this.modelId) return {};
+    return { [this.modelId]: new Set(selected) };
+  }
+
+  /** Full model id list from worker — avoids `getItemsByVisibility` after `resetVisible` (stale until tiles sync). */
+  private async allFragmentLocalIds(fragModel: FragmentsModel): Promise<number[]> {
+    const raw = await fragModel.getLocalIds();
+    return Array.isArray(raw) ? (raw as number[]) : [];
+  }
+
+  private clearContextMainThreadVisuals(): void {
+    for (const mesh of this.contextOverlayMeshes) {
+      mesh.parent?.remove(mesh);
+      const material = mesh.material;
+      if (Array.isArray(material)) {
+        for (const mat of material) mat.dispose();
+      } else {
+        material.dispose();
+      }
+      // Do not dispose geometry: ghost snapshot meshes share fragment geometry buffers.
     }
+    this.contextOverlayMeshes.length = 0;
 
-    await fragments.highlight(
-      {
-        color: SELECTION_HIGHLIGHT_COLOR.clone(),
-        opacity: 1,
-        transparent: false,
-        renderedFaces: 0,
-      },
-      map,
-    );
-    void fragments.core.update(true);
   }
 
-  async highlightItemIds(itemIds: number[]) {
-    if (!this.modelId) return;
-    await this.highlightAnalyzerSubset(
-      itemIds.map((expressId) => ({ id: "", expressId })),
-    );
+  private makeContextGhostMaterial(): THREE.Material {
+    return new THREE.MeshBasicMaterial({
+      color: 0x8f98a3,
+      opacity: Math.max(CONTEXT_ISOLATION_GHOST_OPACITY, 0.16),
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    });
   }
 
-  async clearHighlight() {
-    const fragments = this.components.get(OBC.FragmentsManager);
-    await fragments.resetHighlight();
-    if (this.modelId) {
-      const fragModel = fragments.list.get(this.modelId);
-      if (fragModel) await fragModel.resetOpacity(undefined);
+  private createContextGhostSnapshot(): number {
+    if (!this.modelObject) return 0;
+    let meshCount = 0;
+    this.modelObject.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      const ghostMaterial = this.makeContextGhostMaterial();
+      const ghost = new THREE.Mesh(mesh.geometry, ghostMaterial);
+      ghost.name = CONTEXT_GHOST_SNAPSHOT_NAME;
+      ghost.renderOrder = -10;
+      ghost.matrixAutoUpdate = mesh.matrixAutoUpdate;
+      ghost.position.copy(mesh.position);
+      ghost.quaternion.copy(mesh.quaternion);
+      ghost.scale.copy(mesh.scale);
+      ghost.matrix.copy(mesh.matrix);
+      ghost.matrixWorld.copy(mesh.matrixWorld);
+      let previousGroups: typeof mesh.geometry.groups | null = null;
+      ghost.onBeforeRender = () => {
+        previousGroups = mesh.geometry.groups.map((group) => ({ ...group }));
+        mesh.geometry.clearGroups();
+        const count =
+          mesh.geometry.index?.count ??
+          mesh.geometry.getAttribute("position")?.count ??
+          0;
+        if (count > 0) mesh.geometry.addGroup(0, count, 0);
+      };
+      ghost.onAfterRender = () => {
+        mesh.geometry.clearGroups();
+        for (const group of previousGroups ?? []) {
+          mesh.geometry.addGroup(group.start, group.count, group.materialIndex);
+        }
+        previousGroups = null;
+      };
+      mesh.parent?.add(ghost);
+      this.contextOverlayMeshes.push(ghost);
+      meshCount++;
+    });
+    return meshCount;
+  }
+
+  private async chunkInvokeIds(ids: number[], invoke: (slice: number[]) => Promise<void>): Promise<void> {
+    for (let i = 0; i < ids.length; i += ISOLATION_WORKER_CHUNK) {
+      const slice = ids.slice(i, i + ISOLATION_WORKER_CHUNK);
+      if (slice.length > 0) await invoke(slice);
     }
-    void fragments.core.update(true);
   }
 
-  async focusAnalyzerSubset(entities: Iterable<{ id: string; expressId: number | null }>) {
+  /**
+   * `FragmentsModels.update` early-outs when called inside {@link FragmentsModels.settings.maxUpdateRate}
+   * (~100ms). Isolation uses worker `tiles.restart()`; a skipped update leaves ghosts/hidden state stale
+   * on repeat "הצג בהקשר" / בודד until some later interaction.
+   */
+  private async syncFragmentsViewForced(fragments: OBC.FragmentsManager): Promise<void> {
+    const core = fragments.core;
+    const prev = core.settings.maxUpdateRate;
+    core.settings.maxUpdateRate = 0;
+    try {
+      await core.update(true);
+    } finally {
+      core.settings.maxUpdateRate = prev;
+    }
+  }
+
+  /** Lets postMessage tile batches land before a follow-up forced update (repeat isolation). */
+  private async deferSyncFragmentsView(fragments: OBC.FragmentsManager): Promise<void> {
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    if (!this.disposed) await this.syncFragmentsViewForced(fragments);
+  }
+
+  private enqueueIsolation<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.isolationChain.then(fn);
+    this.isolationChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async focusBboxMap(map: Record<string, Set<number>>): Promise<void> {
     if (!this.modelId) return;
-    const fragments = this.components.get(OBC.FragmentsManager);
-    const map = await this.modelIdMapForAnalyzerEntities(entities);
     const set = map[this.modelId];
     if (!set || set.size === 0) return;
     try {
+      const fragments = this.components.get(OBC.FragmentsManager);
       const boxes = await fragments.getBBoxes(map);
       if (!boxes.length) return;
       const aggregate = new THREE.Box3();
@@ -1355,6 +1490,231 @@ export class ViewerEngine {
     }
   }
 
+  private highlightMaterialParams() {
+    return {
+      color: SELECTION_HIGHLIGHT_COLOR.clone(),
+      opacity: 1,
+      transparent: false,
+      renderedFaces: 0,
+    } as const;
+  }
+
+  private async applyHighlightToMap(map: Record<string, Set<number>>): Promise<void> {
+    const fragments = this.components.get(OBC.FragmentsManager);
+    await fragments.highlight(this.highlightMaterialParams(), map);
+  }
+
+  /**
+   * Full isolation: hide all non-selected items (worker visibility). Context: ghost opacity on non-selected.
+   */
+  applyIsolation(
+    mode: "isolated" | "context",
+    localIds: Set<number>,
+    options?: { focus?: boolean },
+  ): Promise<boolean> {
+    isolationDebug("applyIsolation queued", {
+      mode,
+      localIdCount: localIds.size,
+      sampleLocalIds: [...localIds].slice(0, 24),
+      focus: options?.focus !== false,
+      visualModeBefore: this.isolationVisualMode,
+    });
+    return this.enqueueIsolation(() => this.applyIsolationImpl(mode, localIds, options));
+  }
+
+  private async applyIsolationImpl(
+    mode: "isolated" | "context",
+    localIds: Set<number>,
+    options?: { focus?: boolean },
+  ): Promise<boolean> {
+    if (this.disposed || !this.modelId || localIds.size === 0) {
+      isolationDebug("applyIsolationImpl early exit", {
+        disposed: this.disposed,
+        modelId: this.modelId,
+        localIdsSize: localIds.size,
+      });
+      return false;
+    }
+    const fragments = this.components.get(OBC.FragmentsManager);
+    const fragModel = fragments.list.get(this.modelId);
+    if (!fragModel) {
+      isolationDebug("applyIsolationImpl no fragModel", { modelId: this.modelId });
+      return false;
+    }
+    const doFocus = options?.focus !== false;
+
+    isolationDebug("applyIsolationImpl start", {
+      mode,
+      modelId: this.modelId,
+    });
+
+    this.clearContextMainThreadVisuals();
+    const prevIsolationVisual = this.isolationVisualMode;
+    await fragments.resetHighlight();
+    isolationDebug("after fragments.resetHighlight");
+    /**
+     * `resetVisible` → worker `tiles.restart()` → `_meshConnection.clean()`. That is required when
+     * leaving **בודד** (`setVisible` hides), but after **הצג הכל** it only adds an extra restart on
+     * top of highlight restore and tends to break repeat **הצג בהקשר** (`setOpacity` stops
+     * affecting the GL view even though invokes succeed).
+     */
+    const mustResetVisible = mode === "isolated" || prevIsolationVisual === "isolated";
+    if (mustResetVisible) {
+      await fragModel.resetVisible();
+      isolationDebug("after fragModel.resetVisible");
+    } else {
+      isolationDebug(
+        "context: skip fragModel.resetVisible (not coming from isolated; keep mesh connection stable)",
+      );
+    }
+    await this.syncFragmentsViewForced(fragments);
+    isolationDebug("after sync (post reset)");
+
+    const allIds = await this.allFragmentLocalIds(fragModel);
+    const allIdSet = new Set(allIds);
+    const selected = new Set<number>();
+    for (const id of localIds) {
+      if (allIdSet.has(id)) selected.add(id);
+    }
+    isolationDebug("resolved selection", {
+      allFragmentIdsCount: allIds.length,
+      selectedCount: selected.size,
+      requestedLocalIds: localIds.size,
+      sampleSelected: [...selected].slice(0, 24),
+    });
+    if (selected.size === 0) {
+      isolationDebug("applyIsolationImpl abort: selected empty after intersect with model");
+      return false;
+    }
+
+    const map = this.bboxMapFromLocalSet(selected);
+
+    if (mode === "isolated") {
+      const toHide = allIds.filter((id) => !selected.has(id));
+      await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
+      await this.applyHighlightToMap(map);
+      this.isolationVisualMode = "isolated";
+      await this.syncFragmentsViewForced(fragments);
+      if (doFocus) {
+        await this.focusBboxMap(map);
+        await this.syncFragmentsViewForced(fragments);
+      }
+      await this.deferSyncFragmentsView(fragments);
+      isolationDebug("applyIsolationImpl done isolated", { toHideCount: toHide.length });
+      return true;
+    }
+
+    /**
+     * Context = ghost snapshot of the currently visible model + exact worker visibility for
+     * the real selected item. This uses the same exact selection behavior as `בודד`, so the
+     * picked element keeps its real material/color while the snapshot provides context.
+     */
+    await fragModel.setLodMode(LodMode.ALL_VISIBLE);
+    isolationDebug("context: setLodMode ALL_VISIBLE");
+    await this.syncFragmentsViewForced(fragments);
+    const ghostSnapshotMeshes = this.createContextGhostSnapshot();
+    const toHide = allIds.filter((id) => !selected.has(id));
+    await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
+    await this.syncFragmentsViewForced(fragments);
+    isolationDebug("context: ghost snapshot + exact real selected visibility", {
+      ghostSnapshotMeshes,
+      hiddenRealItems: toHide.length,
+      selectedCount: selected.size,
+    });
+    this.isolationVisualMode = "context";
+    if (doFocus) {
+      await this.focusBboxMap(map);
+    }
+    isolationDebug("applyIsolationImpl done context", {
+      isolationVisualMode: this.isolationVisualMode,
+    });
+    return true;
+  }
+
+  /** Reset visibility, opacity overrides, and highlight (ThatOpen worker). */
+  clearIsolationVisuals(): Promise<void> {
+    return this.enqueueIsolation(async () => {
+      const hadMode = this.isolationVisualMode;
+      isolationDebug("clearIsolationVisuals start", {
+        modelId: this.modelId,
+        hadVisualMode: hadMode,
+      });
+      this.clearContextMainThreadVisuals();
+      this.isolationVisualMode = "none";
+      if (this.disposed || !this.modelId) {
+        isolationDebug("clearIsolationVisuals skip (disposed or no modelId)");
+        return;
+      }
+      const fragments = this.components.get(OBC.FragmentsManager);
+      if (!fragments.initialized) {
+        isolationDebug("clearIsolationVisuals skip (fragments not initialized)");
+        return;
+      }
+      const fragModel = fragments.list.get(this.modelId);
+      await fragments.resetHighlight();
+      isolationDebug("clearIsolationVisuals after fragments.resetHighlight");
+      if (fragModel) {
+        await fragModel.resetVisible();
+        isolationDebug("clearIsolationVisuals after fragModel.resetVisible", {
+          hadFragModel: true,
+          hadMode,
+        });
+      }
+      await this.syncFragmentsViewForced(fragments);
+      isolationDebug("clearIsolationVisuals after sync");
+      await this.deferSyncFragmentsView(fragments);
+      isolationDebug("clearIsolationVisuals done");
+    });
+  }
+
+  async highlightAnalyzerSubset(entities: Iterable<{ id: string; expressId: number | null }>) {
+    const modelId = this.modelId;
+    if (!modelId) return;
+    return this.enqueueIsolation(async () => {
+      const fragments = this.components.get(OBC.FragmentsManager);
+
+      const map = await this.modelIdMapForAnalyzerEntities(entities);
+      const ids = map[modelId];
+      if (!ids || ids.size === 0) {
+        await fragments.resetHighlight();
+        await this.syncFragmentsViewForced(fragments);
+        return;
+      }
+
+      if (this.isolationVisualMode !== "none") {
+        isolationDebug("highlightAnalyzerSubset re-apply isolation", {
+          mode: this.isolationVisualMode,
+          fragmentIdCount: ids.size,
+        });
+        await this.applyIsolationImpl(this.isolationVisualMode, ids, { focus: false });
+        return;
+      }
+
+      await fragments.resetHighlight();
+      await fragments.highlight(this.highlightMaterialParams(), map);
+      await this.syncFragmentsViewForced(fragments);
+    });
+  }
+
+  async highlightItemIds(itemIds: number[]) {
+    if (!this.modelId) return;
+    await this.highlightAnalyzerSubset(
+      itemIds.map((expressId) => ({ id: "", expressId })),
+    );
+  }
+
+  async clearHighlight() {
+    const fragments = this.components.get(OBC.FragmentsManager);
+    await fragments.resetHighlight();
+    await this.syncFragmentsViewForced(fragments);
+  }
+
+  async focusAnalyzerSubset(entities: Iterable<{ id: string; expressId: number | null }>) {
+    if (!this.modelId) return;
+    const map = await this.modelIdMapForAnalyzerEntities(entities);
+    await this.focusBboxMap(map);
+  }
+
   async focusItemIds(itemIds: number[]) {
     await this.focusAnalyzerSubset(itemIds.map((expressId) => ({ id: "", expressId })));
   }
@@ -1374,6 +1734,7 @@ export class ViewerEngine {
     if (this.disposed) return;
     if (!this.modelObject) return;
     if (this.sketchModeEnabled) return;
+    if (this.isolationVisualMode !== "none") return;
     this.modelObject.traverse((child: THREE.Object3D) => {
       const mesh = child as THREE.Mesh;
       const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
@@ -1419,6 +1780,8 @@ export class ViewerEngine {
 
   dispose() {
     if (this.disposed) return;
+    this.clearContextMainThreadVisuals();
+    void this.clearIsolationVisuals();
     this.clearClipping();
     this.disposed = true;
     this.analyzerGuidKeyToFragmentLocal.clear();

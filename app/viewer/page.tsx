@@ -9,6 +9,7 @@ import { SmartMeasurementCard } from "@/components/viewer/SmartMeasurementCard";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
 import { ClippingActiveBar } from "@/components/viewer/ClippingActiveBar";
 import { ViewModeActiveBar } from "@/components/viewer/ViewModeActiveBar";
+import { IsolationActionBar } from "@/components/viewer/IsolationActionBar";
 import { Button } from "@/components/ui/button";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
@@ -16,7 +17,10 @@ import { useClippingStore } from "@/lib/state/clipping-store";
 import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
 import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { useViewerViewStore } from "@/lib/state/viewer-view-store";
+import { useIsolationStore } from "@/lib/state/isolation-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
+
+const ISOLATION_UI_DEBUG = "[eyeSteel:isolation UI]";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import { he } from "@/lib/i18n/he";
@@ -86,6 +90,8 @@ export default function ViewerPage() {
   const setOrthographicView = useViewerViewStore((s) => s.setOrthographicView);
   const clearViewModeStore = useViewerViewStore((s) => s.clearView);
 
+  const isolationMode = useIsolationStore((s) => s.isolationMode);
+
   const clipSnap = useClippingStore(
     useShallow((s) => ({
       active: s.active,
@@ -101,10 +107,17 @@ export default function ViewerPage() {
   useEffect(() => {
     if (!engine || loadingState !== "ready") {
       useClippingStore.getState().reset();
+      useIsolationStore.getState().reset();
       return;
     }
     useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
   }, [engine, loadingState]);
+
+  useEffect(() => {
+    if (!engine) return;
+    if (isolationMode !== "none") return;
+    engine.setTransparency(useAppStore.getState().transparencyEnabled);
+  }, [engine, isolationMode, transparencyEnabled]);
 
   useEffect(() => {
     if (!engine) return;
@@ -258,7 +271,7 @@ export default function ViewerPage() {
   );
 
   useEffect(() => {
-    setAssemblyStructureNotice(false);
+    queueMicrotask(() => setAssemblyStructureNotice(false));
   }, [analyzerData, hasRealIfcAssemblies]);
 
   const assemblyRollupAll = useMemo(
@@ -323,6 +336,82 @@ export default function ViewerPage() {
     [analyzerData, selectedPartId],
   );
 
+  const isolationRefs = useMemo((): { id: string; expressId: number | null }[] => {
+    if (profileGroupDetail?.instances?.length) {
+      return profileGroupDetail.instances.map((p) => ({ id: p.id, expressId: p.expressId }));
+    }
+    if (selectedAssembly) {
+      return analyzerRefsFromAssembly(selectedAssembly);
+    }
+    if (selectedPart) {
+      return [{ id: selectedPart.id, expressId: selectedPart.expressId }];
+    }
+    return [];
+  }, [profileGroupDetail, selectedAssembly, selectedPart]);
+
+  const handleIsolationIsolate = useCallback(async () => {
+    if (!engine) return;
+    console.log(ISOLATION_UI_DEBUG, "בודד clicked", {
+      isolationRefsCount: isolationRefs.length,
+      sampleRefs: isolationRefs.slice(0, 8),
+    });
+    const ids = await engine.resolveIsolationLocalIds(isolationRefs);
+    console.log(ISOLATION_UI_DEBUG, "בודד resolved local ids", {
+      count: ids.size,
+      sample: [...ids].slice(0, 24),
+    });
+    if (ids.size === 0) {
+      console.log(ISOLATION_UI_DEBUG, "בודד abort: no local ids");
+      return;
+    }
+    const ok = await engine.applyIsolation("isolated", ids, { focus: true });
+    console.log(ISOLATION_UI_DEBUG, "בודד applyIsolation result", { ok });
+    if (ok) useIsolationStore.getState().setIsolation("isolated", [...ids]);
+  }, [engine, isolationRefs]);
+
+  const handleIsolationContext = useCallback(async () => {
+    if (!engine) return;
+    console.log(ISOLATION_UI_DEBUG, "הצג בהקשר clicked", {
+      isolationRefsCount: isolationRefs.length,
+      sampleRefs: isolationRefs.slice(0, 8),
+      storeModeBefore: useIsolationStore.getState().isolationMode,
+    });
+    const ids = await engine.resolveIsolationLocalIds(isolationRefs);
+    console.log(ISOLATION_UI_DEBUG, "הצג בהקשר resolved local ids", {
+      count: ids.size,
+      sample: [...ids].slice(0, 24),
+    });
+    if (ids.size === 0) {
+      console.log(ISOLATION_UI_DEBUG, "הצג בהקשר abort: no local ids");
+      return;
+    }
+    const ok = await engine.applyIsolation("context", ids, { focus: true });
+    console.log(ISOLATION_UI_DEBUG, "הצג בהקשר applyIsolation result", {
+      ok,
+      storeModeAfter: ok ? "context" : useIsolationStore.getState().isolationMode,
+    });
+    if (ok) useIsolationStore.getState().setIsolation("context", [...ids]);
+  }, [engine, isolationRefs]);
+
+  const handleIsolationShowAll = useCallback(async () => {
+    if (!engine) return;
+    console.log(ISOLATION_UI_DEBUG, "הצג הכל clicked", {
+      isolationRefsCount: isolationRefs.length,
+      storeModeBefore: useIsolationStore.getState().isolationMode,
+    });
+    await engine.clearIsolationVisuals();
+    useIsolationStore.getState().clearIsolation();
+    engine.setTransparency(useAppStore.getState().transparencyEnabled);
+    /**
+     * Re-applying selection highlight immediately after "show all" has been correlated with
+     * context opacity not taking effect on the next runs (worker ops succeed, visuals stay solid).
+     * Keep show-all as a full visual reset; selection state is still preserved in the store/UI.
+     */
+    console.log(ISOLATION_UI_DEBUG, "הצג הכל → clearHighlight (no immediate restore)");
+    await engine.clearHighlight();
+    console.log(ISOLATION_UI_DEBUG, "הצג הכל done");
+  }, [engine, isolationRefs]);
+
   const selectAssembly = useCallback(
     async (assembly: AnalyzerAssembly | null, opts?: { focusCamera?: boolean }) => {
       const focusCamera = opts?.focusCamera !== false;
@@ -332,7 +421,12 @@ export default function ViewerPage() {
         setAssemblyDetailOverride(null);
         setSelectedAssemblyId(null);
         setSelectedPartId(null);
-        if (engine) await engine.clearHighlight();
+        if (engine) {
+          await engine.clearIsolationVisuals();
+          useIsolationStore.getState().clearIsolation();
+          engine.setTransparency(useAppStore.getState().transparencyEnabled);
+          await engine.clearHighlight();
+        }
         return;
       }
       const allAsm = analyzerData?.assemblies ?? [];
@@ -421,6 +515,9 @@ export default function ViewerPage() {
       setSelectedAssemblyId(null);
       if (!engine) return;
       if (!part) {
+        await engine.clearIsolationVisuals();
+        useIsolationStore.getState().clearIsolation();
+        engine.setTransparency(useAppStore.getState().transparencyEnabled);
         await engine.clearHighlight();
         return;
       }
@@ -551,11 +648,16 @@ export default function ViewerPage() {
 
   const clearViewerSelection = useCallback(async () => {
     setAssemblyStructureNotice(false);
+    if (engine) {
+      await engine.clearIsolationVisuals();
+      useIsolationStore.getState().clearIsolation();
+      engine.setTransparency(useAppStore.getState().transparencyEnabled);
+    }
     await selectAssembly(null);
     await selectPart(null);
     setProfileGroupDetail(null);
     setSelectionStatus("נוקה");
-  }, [selectAssembly, selectPart]);
+  }, [engine, selectAssembly, selectPart]);
 
   const showDataPanel = activeSheet === "details";
 
@@ -588,6 +690,15 @@ export default function ViewerPage() {
           נקה בחירה
         </Button>
       </div>
+
+      <IsolationActionBar
+        visible={isolationRefs.length > 0 && loadingState === "ready"}
+        isolationMode={isolationMode}
+        disabled={!engine || viewerTool === "measurement"}
+        onIsolate={() => void handleIsolationIsolate()}
+        onContext={() => void handleIsolationContext()}
+        onShowAll={() => void handleIsolationShowAll()}
+      />
 
       <ViewerBottomDock
         selectionMode={selectionMode}
