@@ -5,8 +5,9 @@ import * as OBC from "@thatopen/components";
 import * as OBF from "@thatopen/components-front";
 import CameraControls from "camera-controls";
 import { LodMode, type FragmentsModel } from "@thatopen/fragments";
-import type { ViewerMode } from "@/types/domain";
+import type { AnalyzerOutput, ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
+import { normalizeIfcGuidKey } from "@/lib/viewer/ifc-guid";
 import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
 import {
   EYE_STEEL_SCENE_BACKGROUND_HEX,
@@ -29,7 +30,7 @@ import {
   type ViewModeId,
 } from "@/lib/viewer/view-mode-presets";
 
-interface PickHit {
+export interface PickHit {
   localId: number;
   itemId: number;
 }
@@ -51,6 +52,8 @@ export class ViewerEngine {
   private world!: OBC.World;
   private modelObject: THREE.Object3D | null = null;
   private modelId: string | null = null;
+  /** Normalized IFC GlobalId → ThatOpen fragment local id (see {@link ViewerEngine.syncAnalyzerGuidIndex}). */
+  private analyzerGuidKeyToFragmentLocal: Map<string, number> = new Map();
   private disposed = false;
   private readonly viewerLights: THREE.Light[] = [];
 
@@ -640,6 +643,7 @@ export class ViewerEngine {
     }
     this.modelObject = casted.object;
     this.modelId = casted.modelId;
+    this.analyzerGuidKeyToFragmentLocal.clear();
     this.world.scene.three.add(casted.object);
 
     this.boundUseCamera = casted.useCamera.bind(casted);
@@ -966,7 +970,182 @@ export class ViewerEngine {
     this.pickCallback = null;
   }
 
-  async highlightItemIds(itemIds: number[]) {
+  /**
+   * Maps analyzer rows (GlobalId + optional legacy express id) to the fragment local ids
+   * ThatOpen uses for highlight/focus (via {@link OBC.FragmentsManager.guidsToModelIdMap}).
+   */
+  private async modelIdMapForAnalyzerEntities(
+    entities: Iterable<{ id: string; expressId: number | null }>,
+  ): Promise<Record<string, Set<number>>> {
+    if (!this.modelId) return {};
+    const fragments = this.components.get(OBC.FragmentsManager);
+    const list = [...entities];
+    const guids = [...new Set(list.map((e) => e.id).filter((g) => g.length > 0))];
+    const fromGuids =
+      guids.length > 0 ? await fragments.guidsToModelIdMap(guids) : ({} as Record<string, Set<number>>);
+    const set = new Set<number>([...(fromGuids[this.modelId] ?? [])]);
+    for (const e of list) {
+      if (e.expressId != null) set.add(e.expressId);
+    }
+    return { [this.modelId]: set };
+  }
+
+  /**
+   * Recursively read ThatOpen {@link FragmentsModel.getItemsData} trees (relation + attribute blobs)
+   * so picks on nested geometry map back to parent IFC products the analyzer knows about.
+   */
+  private collectIdsAndGuidsFromItemDataRoot(
+    roots: unknown[],
+    localIds: Set<number>,
+    guids: Set<string>,
+    maxNodes: number,
+  ): void {
+    let steps = 0;
+    const visit = (node: unknown): void => {
+      if (steps >= maxNodes) return;
+      if (node === null || node === undefined) return;
+      steps++;
+      if (Array.isArray(node)) {
+        for (const x of node) visit(x);
+        return;
+      }
+      if (typeof node !== "object") return;
+      const o = node as Record<string, unknown>;
+      const lidRaw = o._localId;
+      if (lidRaw && typeof lidRaw === "object" && lidRaw !== null && "value" in lidRaw) {
+        const v = (lidRaw as { value: unknown }).value;
+        if (typeof v === "number" && Number.isFinite(v)) {
+          localIds.add(v);
+        }
+      }
+      const guidRaw = o._guid;
+      if (guidRaw && typeof guidRaw === "object" && guidRaw !== null && "value" in guidRaw) {
+        const g = (guidRaw as { value: unknown }).value;
+        if (typeof g === "string" && g.length > 0) guids.add(g);
+      }
+      for (const [k, v] of Object.entries(o)) {
+        if (k === "_category") continue;
+        visit(v);
+      }
+    };
+    for (const r of roots) visit(r);
+  }
+
+  /** Resolve GPU pick ids to localIds + GUIDs, including parent/aggregate products when the hit is on child geometry. */
+  async resolvePickMatchContext(hit: PickHit): Promise<{ localIds: number[]; guids: string[] }> {
+    const seeds = [
+      ...new Set(
+        [hit.localId, hit.itemId].filter((x): x is number => typeof x === "number"),
+      ),
+    ];
+    const fragments = this.components.get(OBC.FragmentsManager);
+    const model = this.modelId ? fragments.list.get(this.modelId) : null;
+    if (!model || seeds.length === 0) {
+      return { localIds: seeds, guids: [] };
+    }
+
+    const localIdSet = new Set<number>(seeds);
+    const guidSet = new Set<string>();
+
+    try {
+      const rows = await model.getItems(seeds);
+      for (const id of seeds) {
+        const row = rows.get(id);
+        const g = row?.guid;
+        if (typeof g === "string" && g.length > 0) guidSet.add(g);
+      }
+    } catch {
+      /* getItems can fail for transient ids */
+    }
+
+    try {
+      const fromPick = await model.getGuidsByLocalIds(seeds);
+      for (const g of fromPick) {
+        if (typeof g === "string" && g.length > 0) guidSet.add(g);
+      }
+    } catch {
+      /* ignore */
+    }
+
+    try {
+      const relConfig = {
+        attributesDefault: true,
+        relationsDefault: { attributes: false, relations: false },
+        relations: {
+          Decomposes: { attributes: true, relations: false },
+          IsDecomposedBy: { attributes: true, relations: false },
+          Nests: { attributes: true, relations: false },
+          ContainedInStructure: { attributes: true, relations: false },
+        },
+      };
+      const dataRows = await model.getItemsData(seeds, relConfig);
+      this.collectIdsAndGuidsFromItemDataRoot(dataRows, localIdSet, guidSet, 120);
+    } catch {
+      /* ignore relation expansion */
+    }
+
+    // Second pass: resolve GUIDs for newly discovered local ids (often the owning IfcProduct)
+    const extraLocals = [...localIdSet].filter((id) => !seeds.includes(id));
+    if (extraLocals.length > 0) {
+      try {
+        const more = await model.getGuidsByLocalIds(extraLocals.slice(0, 64));
+        for (const g of more) {
+          if (typeof g === "string" && g.length > 0) guidSet.add(g);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    return { localIds: [...localIdSet], guids: [...guidSet] };
+  }
+
+  getAnalyzerGuidIndex(): ReadonlyMap<string, number> {
+    return this.analyzerGuidKeyToFragmentLocal;
+  }
+
+  /**
+   * Pre-resolve every analyzer GlobalId to ThatOpen local ids so picks + highlights stay aligned.
+   * Cheap one-time pass after IFC + JSON analysis are both loaded.
+   */
+  async syncAnalyzerGuidIndex(data: AnalyzerOutput | null): Promise<void> {
+    this.analyzerGuidKeyToFragmentLocal.clear();
+    if (!data || !this.modelId) return;
+    const fragments = this.components.get(OBC.FragmentsManager);
+    const model = fragments.list.get(this.modelId);
+    if (!model) return;
+
+    const unique = new Set<string>();
+    const push = (id: string | null | undefined) => {
+      if (!id || id.length === 0) return;
+      if (/^\d+$/.test(id.trim())) return;
+      unique.add(id);
+    };
+    for (const p of data.parts ?? []) push(p.id);
+    for (const a of data.assemblies ?? []) {
+      for (const p of a.parts ?? []) push(p.id);
+      for (const b of a.bolts ?? []) push(b.id);
+    }
+
+    const guids = [...unique];
+    const CHUNK = 160;
+    for (let i = 0; i < guids.length; i += CHUNK) {
+      const slice = guids.slice(i, i + CHUNK);
+      try {
+        const locals = await model.getLocalIdsByGuids(slice);
+        for (let j = 0; j < slice.length; j++) {
+          const loc = locals[j];
+          if (typeof loc !== "number" || !Number.isFinite(loc)) continue;
+          const k = normalizeIfcGuidKey(slice[j]);
+          if (k) this.analyzerGuidKeyToFragmentLocal.set(k, loc);
+        }
+      } catch {
+        /* chunk failed — continue */
+      }
+    }
+  }
+
+  async highlightAnalyzerSubset(entities: Iterable<{ id: string; expressId: number | null }>) {
     if (!this.modelId) return;
     const fragments = this.components.get(OBC.FragmentsManager);
     const fragModel = fragments.list.get(this.modelId);
@@ -974,7 +1153,9 @@ export class ViewerEngine {
     await fragments.resetHighlight();
     if (fragModel) await fragModel.resetOpacity(undefined);
 
-    if (itemIds.length === 0) {
+    const map = await this.modelIdMapForAnalyzerEntities(entities);
+    const ids = map[this.modelId];
+    if (!ids || ids.size === 0) {
       void fragments.core.update(true);
       return;
     }
@@ -986,9 +1167,16 @@ export class ViewerEngine {
         transparent: false,
         renderedFaces: 0,
       },
-      { [this.modelId]: new Set(itemIds) },
+      map,
     );
     void fragments.core.update(true);
+  }
+
+  async highlightItemIds(itemIds: number[]) {
+    if (!this.modelId) return;
+    await this.highlightAnalyzerSubset(
+      itemIds.map((expressId) => ({ id: "", expressId })),
+    );
   }
 
   async clearHighlight() {
@@ -1001,11 +1189,14 @@ export class ViewerEngine {
     void fragments.core.update(true);
   }
 
-  async focusItemIds(itemIds: number[]) {
-    if (itemIds.length === 0 || !this.modelId) return;
+  async focusAnalyzerSubset(entities: Iterable<{ id: string; expressId: number | null }>) {
+    if (!this.modelId) return;
     const fragments = this.components.get(OBC.FragmentsManager);
+    const map = await this.modelIdMapForAnalyzerEntities(entities);
+    const set = map[this.modelId];
+    if (!set || set.size === 0) return;
     try {
-      const boxes = await fragments.getBBoxes({ [this.modelId]: new Set(itemIds) });
+      const boxes = await fragments.getBBoxes(map);
       if (!boxes.length) return;
       const aggregate = new THREE.Box3();
       boxes.forEach((box) => aggregate.union(box));
@@ -1026,6 +1217,10 @@ export class ViewerEngine {
     } catch (error) {
       console.error("Focus failed:", error);
     }
+  }
+
+  async focusItemIds(itemIds: number[]) {
+    await this.focusAnalyzerSubset(itemIds.map((expressId) => ({ id: "", expressId })));
   }
 
   setMode(mode: ViewerMode) {
@@ -1089,6 +1284,7 @@ export class ViewerEngine {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.analyzerGuidKeyToFragmentLocal.clear();
     try {
       if (this.viewerTool === "measurement") {
         const ctrl = this.world.camera.controls;

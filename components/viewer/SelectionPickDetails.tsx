@@ -331,9 +331,6 @@ export function AssemblyPickDetailPanel({
   onSelectPartInstances: (instances: AnalyzerPart[]) => void;
   onBackToList: () => void;
 }) {
-  const assemblyTitle =
-    assembly.assemblyMark || assembly.name || assembly.tag || "הרכבה";
-
   const aggregatedBolts = useMemo(
     () => aggregateBoltRows(assembly.bolts ?? []),
     [assembly.bolts],
@@ -346,24 +343,31 @@ export function AssemblyPickDetailPanel({
     );
   }, [assembly.parts]);
 
-  const occurrencesInModel = useMemo(
-    () =>
-      allAssemblies?.length
-        ? countAssemblyOccurrencesInModel(assembly, allAssemblies)
-        : 1,
-    [assembly, allAssemblies],
-  );
+  const occurrencesInModel = useMemo(() => {
+    return allAssemblies?.length
+      ? countAssemblyOccurrencesInModel(assembly, allAssemblies)
+      : 1;
+  }, [assembly, allAssemblies]);
 
   const partCountInAssembly = assembly.parts.length;
 
   const rows = [
     { label: "מספר אסמבלי", value: assembly.assemblyMark || EM_DASH },
     { label: "שם אסמבלי", value: assembly.name || assembly.tag || EM_DASH },
-    { label: 'משקל כולל (ק״ג)', value: <span dir="ltr">{formatKgPlain(assembly.weightKg)}</span> },
+    {
+      label: 'משקל כולל (ק״ג)',
+      value: <span dir="ltr">{formatKgPlain(assembly.weightKg)}</span>,
+    },
     { label: "גובה עליון", value: <span dir="ltr">{formatElevationMm(assembly.topElevation)}</span> },
     { label: "גובה תחתון", value: <span dir="ltr">{formatElevationMm(assembly.bottomElevation)}</span> },
     { label: "כמות במודל", value: formatCount(occurrencesInModel) },
   ];
+
+  const assemblyTitle =
+    assembly.assemblyMark ||
+    assembly.name ||
+    assembly.tag ||
+    "הרכבה";
 
   return (
     <div className="space-y-5" dir="rtl">

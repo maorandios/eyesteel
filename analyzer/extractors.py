@@ -255,6 +255,80 @@ def extract_assembly_data(
     }
 
 
+_FALLBACK_SCAN_IFC_TYPES: tuple[str, ...] = (
+    "IfcBeam",
+    "IfcColumn",
+    "IfcMember",
+    "IfcPlate",
+    "IfcBuildingElementProxy",
+)
+
+
+def iter_fallback_scan_entities(model: Any):
+    """IfcProduct scan after explicit types; de-dupe by entity id()."""
+    seen: set[int] = set()
+    for type_name in _FALLBACK_SCAN_IFC_TYPES:
+        try:
+            for ent in model.by_type(type_name):
+                try:
+                    eid = int(ent.id())
+                except Exception:
+                    continue
+                if eid in seen:
+                    continue
+                seen.add(eid)
+                yield ent
+        except Exception:
+            continue
+    try:
+        for ent in model.by_type("IfcProduct"):
+            try:
+                eid = int(ent.id())
+            except Exception:
+                continue
+            if eid in seen:
+                continue
+            seen.add(eid)
+            yield ent
+    except Exception:
+        return
+
+
+def merged_psets_for_fallback_scan(entity: Any) -> dict[str, Any]:
+    """Instance + type + `should_inherit` psets for Tekla metadata often stored on supertypes."""
+    merged = _safe_psets_merged_with_type(entity)
+    try:
+        inh = element.get_psets(entity, should_inherit=True) or {}
+        if isinstance(inh, dict):
+            merged = _merge_pset_dicts(inh, merged)
+    except Exception:
+        pass
+    return merged
+
+
+def entity_indicates_main_steel_part(entity: Any) -> bool:
+    """Tekla / IFC flags like 'Main part' on bolts or part psets."""
+    psets = merged_psets_for_fallback_scan(entity)
+    for blob in psets.values():
+        if not isinstance(blob, dict):
+            continue
+        for key, raw in blob.items():
+            nk = _normalize_prop_key(str(key))
+            if "main" not in nk:
+                continue
+            if "part" not in nk and "component" not in nk:
+                continue
+            val = _unwrap_numeric_property_value(raw)
+            if isinstance(val, bool) and val:
+                return True
+            if isinstance(val, (int, float)) and float(val) != 0.0:
+                return True
+            s = _normalize_string(val)
+            if s and s.upper() in ("YES", "Y", "TRUE", "1", "MAIN", "MAIN PART"):
+                return True
+    return False
+
+
 _PROFILE_PURE_NUMERIC_RE = re.compile(r"^[+-]?(?:\d+[.,]?\d*|[.,]\d+)(?:[eE][+-]?\d+)?$")
 
 
@@ -870,10 +944,31 @@ def get_entity_psets(entity: Any) -> dict[str, Any]:
 
 
 def iter_assembly_parts(assembly: Any):
+    """
+    Direct children of an IfcElementAssembly via decomposition and nesting.
+
+    IFC4 Tekla exports often hang sub-assemblies (e.g. single-member \"BEAM\"
+    groups) only under ``IsNestedBy`` / ``IfcRelNests``. Traversing
+    ``IsDecomposedBy`` alone misses those children, so parent cast units get
+    no steel parts and picks resolve to the tiny nested row only.
+    """
+    seen: set[int] = set()
+
+    def emit(obj: Any):
+        if not hasattr(obj, "is_a"):
+            return
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+        yield obj
+
     for rel in getattr(assembly, "IsDecomposedBy", []) or []:
         for obj in getattr(rel, "RelatedObjects", []) or []:
-            if hasattr(obj, "is_a"):
-                yield obj
+            yield from emit(obj)
+    for rel in getattr(assembly, "IsNestedBy", []) or []:
+        for obj in getattr(rel, "RelatedObjects", []) or []:
+            yield from emit(obj)
 
 
 def iter_assembly_leaf_products(assembly: Any):

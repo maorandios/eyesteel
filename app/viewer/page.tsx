@@ -28,22 +28,31 @@ import {
   type AggregatedProfileTabRow,
 } from "@/components/viewer/SelectionPickDetails";
 import { formatCount, formatKgPlain, formatQuantityInt } from "@/lib/format-numbers";
+import {
+  analyzerEntityMatchesPick,
+  analyzerRefsFromAssembly,
+} from "@/lib/viewer/ifc-guid";
 
 import {
   aggregateAssembliesByMark,
+  choosePreferredAssemblyForModelPick,
   type AggregatedAssemblyRow,
 } from "@/lib/viewer/modelAggregates";
 
-type SelectionMode = "part" | "assembly";
+const ASSEMBLY_STRUCTURE_NOTICE_HE =
+  "המודל אינו מכיל חלוקה לאסמבליז, נדרש לייצא את המודל שוב עם חלוקה לאמסבליז במצב פעיל";
 
+type SelectionMode = "part" | "assembly";
 type ModelDataTab = "assemblies" | "parts" | "profiles";
 
 export default function ViewerPage() {
   const router = useRouter();
   const [engine, setEngine] = useState<ViewerEngine | null>(null);
   const [selectionMode, setSelectionMode] = useState<SelectionMode>("part");
+  const [assemblyStructureNotice, setAssemblyStructureNotice] = useState(false);
   const [modelDataTab, setModelDataTab] = useState<ModelDataTab>("assemblies");
   const [selectedAssemblyId, setSelectedAssemblyId] = useState<string | null>(null);
+  const [assemblyDetailOverride, setAssemblyDetailOverride] = useState<AnalyzerAssembly | null>(null);
   const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
   const [profileGroupDetail, setProfileGroupDetail] = useState<{
     profileLabel: string;
@@ -99,6 +108,11 @@ export default function ViewerPage() {
         setLoadingState("error");
       });
   }, [engine, file, setLoadingState, clearViewModeStore]);
+
+  useEffect(() => {
+    if (!engine || !analyzerData || loadingState !== "ready") return;
+    void engine.syncAnalyzerGuidIndex(analyzerData);
+  }, [engine, analyzerData, loadingState]);
 
   useEffect(() => {
     if (!engine) return;
@@ -159,6 +173,20 @@ export default function ViewerPage() {
     clearViewModeStore();
   }, [engine, clearViewModeStore]);
 
+  const hasRealIfcAssemblies = useMemo(
+    () => (analyzerData?.assemblies ?? []).some((a) => a.expressId != null),
+    [analyzerData?.assemblies],
+  );
+
+  useEffect(() => {
+    setAssemblyStructureNotice(false);
+  }, [analyzerData, hasRealIfcAssemblies]);
+
+  const assemblyRollupAll = useMemo(
+    () => aggregateAssembliesByMark(analyzerData?.assemblies ?? []),
+    [analyzerData?.assemblies],
+  );
+
   const filteredAssemblies = useMemo(() => {
     const list = analyzerData?.assemblies ?? [];
     const q = search.trim().toLowerCase();
@@ -205,10 +233,12 @@ export default function ViewerPage() {
     [filteredParts],
   );
 
-  const selectedAssembly = useMemo(
-    () => analyzerData?.assemblies.find((a) => a.id === selectedAssemblyId) || null,
-    [analyzerData, selectedAssemblyId],
-  );
+  const selectedAssembly = useMemo(() => {
+    if (assemblyDetailOverride && assemblyDetailOverride.id === selectedAssemblyId) {
+      return assemblyDetailOverride;
+    }
+    return analyzerData?.assemblies.find((a) => a.id === selectedAssemblyId) || null;
+  }, [analyzerData, selectedAssemblyId, assemblyDetailOverride]);
   const selectedPart = useMemo(
     () => analyzerData?.parts.find((p) => p.id === selectedPartId) || null,
     [analyzerData, selectedPartId],
@@ -218,52 +248,52 @@ export default function ViewerPage() {
     async (assembly: AnalyzerAssembly | null, opts?: { focusCamera?: boolean }) => {
       const focusCamera = opts?.focusCamera !== false;
       setProfileGroupDetail(null);
-      setSelectedAssemblyId(assembly?.id ?? null);
-      setSelectedPartId(null);
-      if (!engine) return;
+      setAssemblyStructureNotice(false);
       if (!assembly) {
-        await engine.clearHighlight();
+        setAssemblyDetailOverride(null);
+        setSelectedAssemblyId(null);
+        setSelectedPartId(null);
+        if (engine) await engine.clearHighlight();
         return;
       }
-      const steelIds = assembly.parts
-        .map((part) => part.expressId)
-        .filter((n): n is number => typeof n === "number");
-      const boltIds = (assembly.bolts ?? [])
-        .map((b) => b.expressId)
-        .filter((n): n is number => typeof n === "number");
-      const itemIds = [...steelIds, ...boltIds];
-      await engine.highlightItemIds(itemIds);
-      if (focusCamera) await engine.focusItemIds(itemIds);
+      const allAsm = analyzerData?.assemblies ?? [];
+      const inDataset = allAsm.some((a) => a.id === assembly.id);
+      setAssemblyDetailOverride(inDataset ? null : assembly);
+
+      setSelectedAssemblyId(assembly.id);
+      setSelectedPartId(null);
+      if (!engine) return;
+      const refs = analyzerRefsFromAssembly(assembly);
+      await engine.highlightAnalyzerSubset(refs);
+      if (focusCamera) await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
+      const partIds = new Set(assembly.parts.map((p) => p.id));
       const boltCount = assembly.bolts?.length ?? 0;
       setSelectionStatus(
-        `Assembly: ${assembly.assemblyMark || assembly.name || assembly.id} (${formatCount(assembly.parts.length)} חלקים${boltCount ? `, ${formatCount(boltCount)} ברגים` : ""})`,
+        `Assembly: ${assembly.assemblyMark || assembly.name || assembly.id} (${formatCount(partIds.size)} חלקים${boltCount ? `, ${formatCount(boltCount)} ברגים` : ""})`,
       );
     },
-    [engine, setActiveSheet],
+    [engine, setActiveSheet, analyzerData?.assemblies],
   );
 
   const selectAggregatedAssemblyRow = useCallback(
     async (row: AggregatedAssemblyRow) => {
       setProfileGroupDetail(null);
+      setAssemblyDetailOverride(null);
+      setAssemblyStructureNotice(false);
       const primary = row.instances[0];
       if (!primary) return;
       setSelectedAssemblyId(primary.id);
       setSelectedPartId(null);
       if (!engine) return;
 
-      const itemIds: number[] = [];
+      const refs: { id: string; expressId: number | null }[] = [];
       for (const asm of row.instances) {
-        for (const part of asm.parts) {
-          if (typeof part.expressId === "number") itemIds.push(part.expressId);
-        }
-        for (const b of asm.bolts ?? []) {
-          if (typeof b.expressId === "number") itemIds.push(b.expressId);
-        }
+        refs.push(...analyzerRefsFromAssembly(asm));
       }
 
-      await engine.highlightItemIds(itemIds);
-      await engine.focusItemIds(itemIds);
+      await engine.highlightAnalyzerSubset(refs);
+      await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       const boltTotal = row.instances.reduce((s, a) => s + (a.bolts?.length ?? 0), 0);
       const first = row.instances[0];
@@ -284,13 +314,13 @@ export default function ViewerPage() {
         instances: row.instances,
       });
       setSelectedAssemblyId(null);
+      setAssemblyDetailOverride(null);
+      setAssemblyStructureNotice(false);
       setSelectedPartId(null);
       if (!engine) return;
-      const itemIds = row.instances
-        .map((p) => p.expressId)
-        .filter((n): n is number => typeof n === "number");
-      await engine.highlightItemIds(itemIds);
-      await engine.focusItemIds(itemIds);
+      const refs = row.instances.map((p) => ({ id: p.id, expressId: p.expressId }));
+      await engine.highlightAnalyzerSubset(refs);
+      await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       setSelectionStatus(`פרופיל: ${row.profileLabel} · ${formatCount(row.instances.length)} חלקים`);
     },
@@ -306,6 +336,8 @@ export default function ViewerPage() {
       if (part !== null && !opts?.preserveProfileGroup) {
         setProfileGroupDetail(null);
       }
+      setAssemblyStructureNotice(false);
+      setAssemblyDetailOverride(null);
       setSelectedPartId(part?.id ?? null);
       setSelectedAssemblyId(null);
       if (!engine) return;
@@ -313,9 +345,9 @@ export default function ViewerPage() {
         await engine.clearHighlight();
         return;
       }
-      const itemIds = part.expressId !== null ? [part.expressId] : [];
-      await engine.highlightItemIds(itemIds);
-      if (focusCamera) await engine.focusItemIds(itemIds);
+      const refs = [{ id: part.id, expressId: part.expressId }];
+      await engine.highlightAnalyzerSubset(refs);
+      if (focusCamera) await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       setSelectionStatus(
         isAnalyzerBoltRow(part)
@@ -329,16 +361,16 @@ export default function ViewerPage() {
   const selectPartInstances = useCallback(
     async (instances: AnalyzerPart[]) => {
       setProfileGroupDetail(null);
+      setAssemblyDetailOverride(null);
+      setAssemblyStructureNotice(false);
       const first = instances[0];
       if (!first) return;
       setSelectedPartId(first.id);
       setSelectedAssemblyId(null);
       if (!engine) return;
-      const itemIds = instances
-        .map((p) => p.expressId)
-        .filter((n): n is number => typeof n === "number");
-      await engine.highlightItemIds(itemIds);
-      await engine.focusItemIds(itemIds);
+      const refs = instances.map((p) => ({ id: p.id, expressId: p.expressId }));
+      await engine.highlightAnalyzerSubset(refs);
+      await engine.focusAnalyzerSubset(refs);
       setActiveSheet("details");
       const label = displayPartMark(first);
       setSelectionStatus(
@@ -351,40 +383,86 @@ export default function ViewerPage() {
   useEffect(() => {
     if (!engine) return;
     engine.setPickCallback(async (hit) => {
+      const highlightIds =
+        typeof hit.localId === "number"
+          ? [hit.localId]
+          : typeof hit.itemId === "number"
+            ? [hit.itemId]
+            : [];
+
+      const pickCtx = await engine.resolvePickMatchContext(hit);
+      const guidIdx = engine.getAnalyzerGuidIndex();
+
       if (!analyzerData) {
-        await engine.highlightItemIds([hit.itemId]);
-        setSelectionStatus(`נבחר פריט IFC ${formatCount(hit.itemId)} (נתוני ניתוח לא זמינים)`);
-        return;
-      }
-
-      const part =
-        analyzerData.parts.find((p) => p.expressId === hit.itemId) ||
-        analyzerData.parts.find((p) => p.expressId === hit.localId);
-
-      if (!part) {
-        await engine.highlightItemIds([hit.itemId]);
-        setSelectionStatus(`לא זוהתה התאמה (item:${formatCount(hit.itemId)})`);
-        return;
-      }
-
-      if (selectionMode === "assembly") {
-        const assembly = analyzerData.assemblies.find(
-          (a) =>
-            a.parts.some((p) => p.id === part.id) ||
-            (a.bolts ?? []).some((b) => b.id === part.id),
+        if (highlightIds.length) await engine.highlightItemIds(highlightIds);
+        setSelectionStatus(
+          highlightIds.length
+            ? `נבחר פריט IFC ${formatCount(highlightIds[0])} (נתוני ניתוח לא זמינים)`
+            : "נבחרה נקודה במודל (נתוני ניתוח לא זמינים)",
         );
+        return;
+      }
+
+      if (selectionMode === "assembly" && !hasRealIfcAssemblies) {
+        if (highlightIds.length) await engine.highlightItemIds(highlightIds);
+        setAssemblyStructureNotice(true);
+        setAssemblyDetailOverride(null);
+        setSelectedAssemblyId(null);
+        setSelectedPartId(null);
+        setProfileGroupDetail(null);
+        setActiveSheet("details");
+        setSelectionStatus(ASSEMBLY_STRUCTURE_NOTICE_HE);
+        return;
+      }
+
+      if (selectionMode === "assembly" && hasRealIfcAssemblies) {
+        const candidates = analyzerData.assemblies.filter(
+          (a) =>
+            a.expressId != null &&
+            (a.parts.some((p) =>
+              analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+            ) ||
+              (a.bolts ?? []).some((b) =>
+                analyzerEntityMatchesPick(b, pickCtx.localIds, pickCtx.guids, guidIdx),
+              )),
+        );
+        const assembly = choosePreferredAssemblyForModelPick(candidates);
         if (assembly) {
           await selectAssembly(assembly, { focusCamera: false });
           return;
         }
       }
+
+      const part = analyzerData.parts.find((p) =>
+        analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+      );
+
+      if (!part) {
+        if (highlightIds.length) await engine.highlightItemIds(highlightIds);
+        setSelectionStatus(
+          `לא זוהתה התאמה (local:${formatCount(hit.localId)}, item:${formatCount(hit.itemId)})`,
+        );
+        return;
+      }
+
       await selectPart(part, { focusCamera: false });
     });
     return () => engine.setPickCallback(null);
-  }, [engine, analyzerData, selectionMode, selectAssembly, selectPart]);
+  }, [
+    engine,
+    analyzerData,
+    selectionMode,
+    hasRealIfcAssemblies,
+    selectAssembly,
+    selectPart,
+    setActiveSheet,
+  ]);
 
   const handleDockSelectionMode = useCallback((m: SelectionMode) => {
     setSelectionMode(m);
+    if (m === "part") {
+      setAssemblyStructureNotice(false);
+    }
     setSelectionStatus(
       m === "assembly"
         ? "מצב Assembly: לחץ אלמנט במודל או שורה בטבלה"
@@ -393,6 +471,7 @@ export default function ViewerPage() {
   }, []);
 
   const clearViewerSelection = useCallback(async () => {
+    setAssemblyStructureNotice(false);
     await selectAssembly(null);
     await selectPart(null);
     setProfileGroupDetail(null);
@@ -420,8 +499,7 @@ export default function ViewerPage() {
       <div className="pointer-events-auto absolute right-3 top-[4.75rem] z-20 flex max-w-[min(19rem,88vw)] flex-col items-end gap-1 safe-top">
         {analyzerData && (
           <div className="rounded-lg border border-zinc-700 bg-zinc-900/88 px-2 py-1 text-[10px] leading-tight text-zinc-300">
-            {formatCount(analyzerData.assemblies.length)} הרכבות · {formatCount(analyzerData.parts.length)}{" "}
-            חלקים
+            {formatCount(assemblyRollupAll.length)} הרכבות · {formatCount(analyzerData.parts.length)} חלקים
           </div>
         )}
         <div className="w-full truncate rounded-lg border border-zinc-700 bg-zinc-900/88 px-2 py-1 text-[10px] text-zinc-300">
@@ -463,20 +541,28 @@ export default function ViewerPage() {
           >
           <div className="mb-3 flex items-center justify-between gap-2">
             <p className="text-sm font-semibold text-zinc-100">
-              {selectedAssembly
-                ? "פרטי הרכבה"
-                : selectedPart
-                  ? "פרטי חלק"
-                  : profileGroupDetail
-                    ? "פרטי פרופיל"
-                    : `נתוני מודל (${modeLabel})`}
+              {assemblyStructureNotice
+                ? "מצב הרכבה"
+                : selectedAssembly
+                  ? "פרטי הרכבה"
+                  : selectedPart
+                    ? "פרטי חלק"
+                    : profileGroupDetail
+                      ? "פרטי פרופיל"
+                      : `נתוני מודל (${modeLabel})`}
             </p>
-            <Button variant="ghost" onClick={() => setActiveSheet("none")}>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setAssemblyStructureNotice(false);
+                setActiveSheet("none");
+              }}
+            >
               סגור
             </Button>
           </div>
 
-          {!selectedAssembly && !selectedPart && !profileGroupDetail && (
+          {!selectedAssembly && !selectedPart && !profileGroupDetail && !assemblyStructureNotice && (
             <div className="mb-3 text-xs text-zinc-400">
               {modelDataTab === "assemblies" && (
                 <>
@@ -500,7 +586,9 @@ export default function ViewerPage() {
           )}
 
           <div className="max-h-[calc(100vh-11rem)] overflow-auto rounded-xl border border-zinc-800 bg-zinc-950/30 p-2">
-            {selectedAssembly ? (
+            {assemblyStructureNotice ? (
+              <p className="px-1 text-sm leading-relaxed text-zinc-200">{ASSEMBLY_STRUCTURE_NOTICE_HE}</p>
+            ) : selectedAssembly ? (
               <AssemblyPickDetailPanel
                 assembly={selectedAssembly}
                 allAssemblies={analyzerData?.assemblies ?? []}

@@ -77,3 +77,25 @@ export function countAssemblyOccurrencesInModel(
   const key = assemblyGroupKey(assembly);
   return allAssemblies.filter((a) => assemblyGroupKey(a) === key).length;
 }
+
+/**
+ * When several IfcElementAssembly rows contain the same picked part (nested Tekla groups),
+ * prefer the row with more steel parts / bolts and a clearer mark.
+ */
+export function choosePreferredAssemblyForModelPick(
+  candidates: AnalyzerAssembly[],
+): AnalyzerAssembly | null {
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  const score = (a: AnalyzerAssembly): number => {
+    const steel = a.parts?.length ?? 0;
+    const bolts = a.bolts?.length ?? 0;
+    let s = steel * 100_000 + bolts * 50;
+    if ((a.assemblyMark || "").trim()) s += 5_000;
+    if ((a.positionCode || "").trim()) s += 500;
+    return s;
+  };
+
+  return candidates.reduce((best, cur) => (score(cur) > score(best) ? cur : best));
+}
