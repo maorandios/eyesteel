@@ -59,19 +59,7 @@ const ISOLATION_WORKER_CHUNK = 384;
 /** Non-selected opacity in context isolation (ghost geometry). */
 const CONTEXT_ISOLATION_GHOST_OPACITY = 0.09;
 
-const ISOLATION_DEBUG_PREFIX = "[eyeSteel:isolation]";
 const CONTEXT_GHOST_SNAPSHOT_NAME = "eyeSteel-context-ghost-snapshot";
-
-function isolationDebug(
-  step: string,
-  data?: Record<string, unknown>,
-): void {
-  if (data === undefined) {
-    console.log(ISOLATION_DEBUG_PREFIX, step);
-  } else {
-    console.log(ISOLATION_DEBUG_PREFIX, step, data);
-  }
-}
 
 export class ViewerEngine {
   private readonly container: HTMLDivElement;
@@ -1512,13 +1500,6 @@ export class ViewerEngine {
     localIds: Set<number>,
     options?: { focus?: boolean },
   ): Promise<boolean> {
-    isolationDebug("applyIsolation queued", {
-      mode,
-      localIdCount: localIds.size,
-      sampleLocalIds: [...localIds].slice(0, 24),
-      focus: options?.focus !== false,
-      visualModeBefore: this.isolationVisualMode,
-    });
     return this.enqueueIsolation(() => this.applyIsolationImpl(mode, localIds, options));
   }
 
@@ -1528,30 +1509,18 @@ export class ViewerEngine {
     options?: { focus?: boolean },
   ): Promise<boolean> {
     if (this.disposed || !this.modelId || localIds.size === 0) {
-      isolationDebug("applyIsolationImpl early exit", {
-        disposed: this.disposed,
-        modelId: this.modelId,
-        localIdsSize: localIds.size,
-      });
       return false;
     }
     const fragments = this.components.get(OBC.FragmentsManager);
     const fragModel = fragments.list.get(this.modelId);
     if (!fragModel) {
-      isolationDebug("applyIsolationImpl no fragModel", { modelId: this.modelId });
       return false;
     }
     const doFocus = options?.focus !== false;
 
-    isolationDebug("applyIsolationImpl start", {
-      mode,
-      modelId: this.modelId,
-    });
-
     this.clearContextMainThreadVisuals();
     const prevIsolationVisual = this.isolationVisualMode;
     await fragments.resetHighlight();
-    isolationDebug("after fragments.resetHighlight");
     /**
      * `resetVisible` → worker `tiles.restart()` → `_meshConnection.clean()`. That is required when
      * leaving **בודד** (`setVisible` hides), but after **הצג הכל** it only adds an extra restart on
@@ -1561,14 +1530,8 @@ export class ViewerEngine {
     const mustResetVisible = mode === "isolated" || prevIsolationVisual === "isolated";
     if (mustResetVisible) {
       await fragModel.resetVisible();
-      isolationDebug("after fragModel.resetVisible");
-    } else {
-      isolationDebug(
-        "context: skip fragModel.resetVisible (not coming from isolated; keep mesh connection stable)",
-      );
     }
     await this.syncFragmentsViewForced(fragments);
-    isolationDebug("after sync (post reset)");
 
     const allIds = await this.allFragmentLocalIds(fragModel);
     const allIdSet = new Set(allIds);
@@ -1576,14 +1539,7 @@ export class ViewerEngine {
     for (const id of localIds) {
       if (allIdSet.has(id)) selected.add(id);
     }
-    isolationDebug("resolved selection", {
-      allFragmentIdsCount: allIds.length,
-      selectedCount: selected.size,
-      requestedLocalIds: localIds.size,
-      sampleSelected: [...selected].slice(0, 24),
-    });
     if (selected.size === 0) {
-      isolationDebug("applyIsolationImpl abort: selected empty after intersect with model");
       return false;
     }
 
@@ -1600,7 +1556,6 @@ export class ViewerEngine {
         await this.syncFragmentsViewForced(fragments);
       }
       await this.deferSyncFragmentsView(fragments);
-      isolationDebug("applyIsolationImpl done isolated", { toHideCount: toHide.length });
       return true;
     }
 
@@ -1610,60 +1565,37 @@ export class ViewerEngine {
      * picked element keeps its real material/color while the snapshot provides context.
      */
     await fragModel.setLodMode(LodMode.ALL_VISIBLE);
-    isolationDebug("context: setLodMode ALL_VISIBLE");
     await this.syncFragmentsViewForced(fragments);
-    const ghostSnapshotMeshes = this.createContextGhostSnapshot();
+    this.createContextGhostSnapshot();
     const toHide = allIds.filter((id) => !selected.has(id));
     await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
     await this.syncFragmentsViewForced(fragments);
-    isolationDebug("context: ghost snapshot + exact real selected visibility", {
-      ghostSnapshotMeshes,
-      hiddenRealItems: toHide.length,
-      selectedCount: selected.size,
-    });
     this.isolationVisualMode = "context";
     if (doFocus) {
       await this.focusBboxMap(map);
     }
-    isolationDebug("applyIsolationImpl done context", {
-      isolationVisualMode: this.isolationVisualMode,
-    });
     return true;
   }
 
   /** Reset visibility, opacity overrides, and highlight (ThatOpen worker). */
   clearIsolationVisuals(): Promise<void> {
     return this.enqueueIsolation(async () => {
-      const hadMode = this.isolationVisualMode;
-      isolationDebug("clearIsolationVisuals start", {
-        modelId: this.modelId,
-        hadVisualMode: hadMode,
-      });
       this.clearContextMainThreadVisuals();
       this.isolationVisualMode = "none";
       if (this.disposed || !this.modelId) {
-        isolationDebug("clearIsolationVisuals skip (disposed or no modelId)");
         return;
       }
       const fragments = this.components.get(OBC.FragmentsManager);
       if (!fragments.initialized) {
-        isolationDebug("clearIsolationVisuals skip (fragments not initialized)");
         return;
       }
       const fragModel = fragments.list.get(this.modelId);
       await fragments.resetHighlight();
-      isolationDebug("clearIsolationVisuals after fragments.resetHighlight");
       if (fragModel) {
         await fragModel.resetVisible();
-        isolationDebug("clearIsolationVisuals after fragModel.resetVisible", {
-          hadFragModel: true,
-          hadMode,
-        });
       }
       await this.syncFragmentsViewForced(fragments);
-      isolationDebug("clearIsolationVisuals after sync");
       await this.deferSyncFragmentsView(fragments);
-      isolationDebug("clearIsolationVisuals done");
     });
   }
 
@@ -1682,10 +1614,6 @@ export class ViewerEngine {
       }
 
       if (this.isolationVisualMode !== "none") {
-        isolationDebug("highlightAnalyzerSubset re-apply isolation", {
-          mode: this.isolationVisualMode,
-          fragmentIdCount: ids.size,
-        });
         await this.applyIsolationImpl(this.isolationVisualMode, ids, { focus: false });
         return;
       }

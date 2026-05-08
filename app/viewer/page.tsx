@@ -19,8 +19,6 @@ import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { useViewerViewStore } from "@/lib/state/viewer-view-store";
 import { useIsolationStore } from "@/lib/state/isolation-store";
 import { ViewerEngine } from "@/lib/viewer/engine";
-
-const ISOLATION_UI_DEBUG = "[eyeSteel:isolation UI]";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import { he } from "@/lib/i18n/he";
@@ -351,54 +349,26 @@ export default function ViewerPage() {
 
   const handleIsolationIsolate = useCallback(async () => {
     if (!engine) return;
-    console.log(ISOLATION_UI_DEBUG, "בודד clicked", {
-      isolationRefsCount: isolationRefs.length,
-      sampleRefs: isolationRefs.slice(0, 8),
-    });
     const ids = await engine.resolveIsolationLocalIds(isolationRefs);
-    console.log(ISOLATION_UI_DEBUG, "בודד resolved local ids", {
-      count: ids.size,
-      sample: [...ids].slice(0, 24),
-    });
     if (ids.size === 0) {
-      console.log(ISOLATION_UI_DEBUG, "בודד abort: no local ids");
       return;
     }
     const ok = await engine.applyIsolation("isolated", ids, { focus: true });
-    console.log(ISOLATION_UI_DEBUG, "בודד applyIsolation result", { ok });
     if (ok) useIsolationStore.getState().setIsolation("isolated", [...ids]);
   }, [engine, isolationRefs]);
 
   const handleIsolationContext = useCallback(async () => {
     if (!engine) return;
-    console.log(ISOLATION_UI_DEBUG, "הצג בהקשר clicked", {
-      isolationRefsCount: isolationRefs.length,
-      sampleRefs: isolationRefs.slice(0, 8),
-      storeModeBefore: useIsolationStore.getState().isolationMode,
-    });
     const ids = await engine.resolveIsolationLocalIds(isolationRefs);
-    console.log(ISOLATION_UI_DEBUG, "הצג בהקשר resolved local ids", {
-      count: ids.size,
-      sample: [...ids].slice(0, 24),
-    });
     if (ids.size === 0) {
-      console.log(ISOLATION_UI_DEBUG, "הצג בהקשר abort: no local ids");
       return;
     }
     const ok = await engine.applyIsolation("context", ids, { focus: true });
-    console.log(ISOLATION_UI_DEBUG, "הצג בהקשר applyIsolation result", {
-      ok,
-      storeModeAfter: ok ? "context" : useIsolationStore.getState().isolationMode,
-    });
     if (ok) useIsolationStore.getState().setIsolation("context", [...ids]);
   }, [engine, isolationRefs]);
 
   const handleIsolationShowAll = useCallback(async () => {
     if (!engine) return;
-    console.log(ISOLATION_UI_DEBUG, "הצג הכל clicked", {
-      isolationRefsCount: isolationRefs.length,
-      storeModeBefore: useIsolationStore.getState().isolationMode,
-    });
     await engine.clearIsolationVisuals();
     useIsolationStore.getState().clearIsolation();
     engine.setTransparency(useAppStore.getState().transparencyEnabled);
@@ -407,10 +377,8 @@ export default function ViewerPage() {
      * context opacity not taking effect on the next runs (worker ops succeed, visuals stay solid).
      * Keep show-all as a full visual reset; selection state is still preserved in the store/UI.
      */
-    console.log(ISOLATION_UI_DEBUG, "הצג הכל → clearHighlight (no immediate restore)");
     await engine.clearHighlight();
-    console.log(ISOLATION_UI_DEBUG, "הצג הכל done");
-  }, [engine, isolationRefs]);
+  }, [engine]);
 
   const selectAssembly = useCallback(
     async (assembly: AnalyzerAssembly | null, opts?: { focusCamera?: boolean }) => {
