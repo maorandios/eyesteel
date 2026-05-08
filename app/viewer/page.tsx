@@ -760,8 +760,9 @@ export default function ViewerPage() {
 
   return (
     <main className="relative h-screen w-screen overflow-hidden">
-      <ViewerCanvas onReady={onReady} />
-
+      <div className="absolute inset-0 z-0">
+        <ViewerCanvas onReady={onReady} />
+      </div>
       <div className="pointer-events-auto absolute left-3 top-3 z-40 safe-top">
         <Button variant="secondary" size="lg" className="shadow-lg" onClick={() => router.push("/")}>
           {he.backToUpload}

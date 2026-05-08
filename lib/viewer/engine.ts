@@ -243,23 +243,28 @@ export class ViewerEngine {
   }
 
   private updateOrthoFrustum(box: THREE.Box3) {
-    const size = box.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z, 1);
-    const halfBase = 0.5 * maxDim * ORTHO_MARGIN;
     const renderer = this.world.renderer as OBF.RendererWith2D;
     const el = renderer.container;
     const w = el.clientWidth;
     const h = el.clientHeight;
     const aspect = w > 0 && h > 0 ? w / h : 1;
+    this.updateOrthoFrustumForAspect(box, aspect);
+  }
+
+  private updateOrthoFrustumForAspect(box: THREE.Box3, aspect: number) {
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    const halfBase = 0.5 * maxDim * ORTHO_MARGIN;
     const ortho = this.orthographicCamera;
-    if (aspect >= 1) {
-      const halfW = halfBase * aspect;
+    const safeAspect = aspect > 0 && Number.isFinite(aspect) ? aspect : 1;
+    if (safeAspect >= 1) {
+      const halfW = halfBase * safeAspect;
       ortho.left = -halfW;
       ortho.right = halfW;
       ortho.top = halfBase;
       ortho.bottom = -halfBase;
     } else {
-      const halfH = halfBase / aspect;
+      const halfH = halfBase / safeAspect;
       ortho.left = -halfBase;
       ortho.right = halfBase;
       ortho.top = halfH;
@@ -1121,6 +1126,7 @@ export class ViewerEngine {
        * Strict `target === canvas` broke desktop when clicks hit those overlays.
        */
       if (!this.pointerDownArmsModelTap(event, canvas)) return;
+
       syncNdc(event);
       if (event.button !== 0 && event.pointerType === "mouse") return;
       if (
