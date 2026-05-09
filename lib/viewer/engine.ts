@@ -18,7 +18,6 @@ import {
   buildSelectionHighlightMaterial,
   createEyeSteelLights,
 } from "@/lib/viewer/visual-policy";
-import { buildIsolationSelectionEdgeLines } from "@/lib/viewer/isolation-selection-edges";
 import {
   attachSketchEdges,
   createSketchFillMaterial,
@@ -27,6 +26,7 @@ import {
   restoreSelectionTintOnSketchLineSegments,
   setContextIsolationEdgeOpacity,
   setSketchEdgeVisibility,
+  syncSketchEdgeVisibilityFromLodFilter,
   stripSketchEdgeChildren,
 } from "@/lib/viewer/sketch-mode";
 import {
@@ -80,7 +80,7 @@ export class ViewerEngine {
   private hostMeasurePointerDownCapture: ((event: PointerEvent) => void) | null = null;
   private readonly lastPointerNdc = new THREE.Vector2(0, 0);
   private downPos: { x: number; y: number; t: number; pointerType: string } | null = null;
-  private pickCallback: ((hit: PickHit) => void) | null = null;
+  private pickCallback: ((hit: PickHit | null) => void) | null = null;
   private fragmentCameraHooksInstalled = false;
   /** `FragmentsManager.list` is only valid after {@link OBC.FragmentsManager.init}. */
   private fragmentsClippingListenersInstalled = false;
@@ -129,8 +129,6 @@ export class ViewerEngine {
    * so mesh traversal does not fight ThatOpen LOD opacity overrides.
    */
   private isolationVisualMode: IsolationMode = "none";
-  /** Picked-only edge lines while tile sketch overlays are off in isolation / context. */
-  private isolationSelectionEdgeGroup: THREE.Group | null = null;
   private readonly contextOverlayMeshes: THREE.Mesh[] = [];
   /**
    * Serializes isolation RPCs + tile sync. Overlapping `applyIsolation` / `clearIsolationVisuals` (e.g. UI +
@@ -572,48 +570,20 @@ export class ViewerEngine {
   }
 
   /**
-   * Default tile sketch edges (LineSegments + LOD wire sidecars) ignore `setVisible` for some tiles,
-   * so hidden members leak as colored lines. Turn them off in **בודד** / **הצג בהקשר**; picked
-   * elements use {@link rebuildIsolationSelectionEdgeOverlay} instead.
+   * Per-mode sketch edge visibility:
+   * - **`isolated`**: drive visibility from the worker's `itemFilter` (Option B). Tiles whose every
+   *   instance is culled hide their edges; mixed tiles rely on the LOD wire shader's
+   *   `itemFilter == 0 → gl_Position = vec4(0)` early-out.
+   * - **`context`**: keep all sketch edges visible — non-picked items are dimmed via
+   *   {@link setContextIsolationEdgeOpacity} to match the 15% ghost face overlay.
+   * - **`none`**: all edges visible at full opacity (live `lodColor` per element).
    */
   private syncSketchEdgeVisibilityToIsolationState(): void {
     if (!this.modelObject) return;
-    const hide =
-      this.isolationVisualMode === "isolated" || this.isolationVisualMode === "context";
-    setSketchEdgeVisibility(this.modelObject, !hide);
-  }
-
-  private clearIsolationSelectionEdgeOverlay(): void {
-    const g = this.isolationSelectionEdgeGroup;
-    if (!g) return;
-    g.removeFromParent();
-    g.traverse((obj) => {
-      if (obj instanceof THREE.LineSegments) obj.geometry?.dispose();
-    });
-    this.isolationSelectionEdgeGroup = null;
-  }
-
-  private async rebuildIsolationSelectionEdgeOverlay(
-    fragModel: FragmentsModel,
-    selected: Set<number>,
-  ): Promise<void> {
-    this.clearIsolationSelectionEdgeOverlay();
-    if (!this.modelObject || selected.size === 0) return;
-    if (this.isolationVisualMode !== "isolated" && this.isolationVisualMode !== "context") {
-      return;
-    }
-    try {
-      const group = await buildIsolationSelectionEdgeLines(
-        fragModel,
-        this.modelObject,
-        [...selected],
-        this.sketchEdgeMaterialPool,
-      );
-      if (group.children.length === 0) return;
-      this.isolationSelectionEdgeGroup = group;
-      this.modelObject.add(group);
-    } catch (err) {
-      console.warn("Isolation selection edge overlay failed:", err);
+    if (this.isolationVisualMode === "isolated") {
+      syncSketchEdgeVisibilityFromLodFilter(this.modelObject);
+    } else {
+      setSketchEdgeVisibility(this.modelObject, true);
     }
   }
 
@@ -951,7 +921,7 @@ export class ViewerEngine {
     return this.modelId;
   }
 
-  setPickCallback(cb: ((hit: PickHit) => void) | null) {
+  setPickCallback(cb: ((hit: PickHit | null) => void) | null) {
     this.pickCallback = cb;
   }
 
@@ -1205,7 +1175,6 @@ export class ViewerEngine {
         return;
       }
 
-      if (!hit) return;
       try {
         this.pickCallback(hit);
       } catch (error) {
@@ -1451,7 +1420,6 @@ export class ViewerEngine {
   }
 
   private clearContextMainThreadVisuals(): void {
-    this.clearIsolationSelectionEdgeOverlay();
     setContextIsolationEdgeOpacity(
       null,
       this.modelObject,
@@ -1721,7 +1689,6 @@ export class ViewerEngine {
       }
       await this.deferSyncFragmentsView(fragments);
       this.syncSketchEdgeVisibilityToIsolationState();
-      await this.rebuildIsolationSelectionEdgeOverlay(fragModel, selected);
       return true;
     }
 
@@ -1740,8 +1707,17 @@ export class ViewerEngine {
     if (doFocus) {
       await this.focusBboxMap(map);
     }
+    /**
+     * Match the 15% ghost face opacity on every sketch edge (LineBasic pool + LOD wire `lodOpacity`)
+     * so the rest of the model reads as a faint sketch. The picked element keeps a 100% face that
+     * still pops visually against the dimmed edges + ghosts.
+     */
+    setContextIsolationEdgeOpacity(
+      CONTEXT_GHOST_FACE_OPACITY,
+      this.modelObject,
+      this.sketchEdgeMaterialPool,
+    );
     this.syncSketchEdgeVisibilityToIsolationState();
-    await this.rebuildIsolationSelectionEdgeOverlay(fragModel, selected);
     return true;
   }
 

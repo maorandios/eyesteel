@@ -583,9 +583,33 @@ export default function ViewerPage() {
     [engine, setActiveSheet],
   );
 
+  const clearViewerSelection = useCallback(async () => {
+    setAssemblyStructureNotice(false);
+    useMultiSelectStore.getState().exitMultiSelectSession();
+    if (engine) {
+      await engine.clearIsolationVisuals();
+      useIsolationStore.getState().clearIsolation();
+      engine.setTransparency(useAppStore.getState().transparencyEnabled);
+    }
+    await selectAssembly(null);
+    await selectPart(null);
+    setProfileGroupDetail(null);
+    setSelectionStatus("נוקה");
+  }, [engine, selectAssembly, selectPart]);
+
   useEffect(() => {
     if (!engine) return;
     engine.setPickCallback(async (hit) => {
+      if (!hit) {
+        /**
+         * Empty-canvas tap: clear the current selection so users can deselect by clicking away.
+         * In "בחירה מרובה" we keep the running set so accidental misses don't wipe it.
+         */
+        if (useMultiSelectStore.getState().pickInteractionMode === "multi") return;
+        await clearViewerSelection();
+        return;
+      }
+
       const highlightIds =
         typeof hit.localId === "number"
           ? [hit.localId]
@@ -728,6 +752,7 @@ export default function ViewerPage() {
     selectAssembly,
     selectPart,
     setActiveSheet,
+    clearViewerSelection,
   ]);
 
   const handleDockSelectionMode = useCallback((m: SelectionMode) => {
@@ -741,20 +766,6 @@ export default function ViewerPage() {
         : "מצב Part: לחץ אלמנט במודל או שורה בטבלה",
     );
   }, []);
-
-  const clearViewerSelection = useCallback(async () => {
-    setAssemblyStructureNotice(false);
-    useMultiSelectStore.getState().exitMultiSelectSession();
-    if (engine) {
-      await engine.clearIsolationVisuals();
-      useIsolationStore.getState().clearIsolation();
-      engine.setTransparency(useAppStore.getState().transparencyEnabled);
-    }
-    await selectAssembly(null);
-    await selectPart(null);
-    setProfileGroupDetail(null);
-    setSelectionStatus("נוקה");
-  }, [engine, selectAssembly, selectPart]);
 
   const showDataPanel = activeSheet === "details";
 

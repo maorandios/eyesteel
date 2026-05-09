@@ -477,3 +477,46 @@ export function setSketchEdgeVisibility(root: THREE.Object3D, visible: boolean):
     }
   });
 }
+
+/**
+ * Per-tile sketch edge visibility driven by the worker's `itemFilter` attribute, which is the
+ * single source of truth after `setVisible` / `resetVisible`. Tiles with at least one visible
+ * instance keep their edges; tiles where every instance is culled hide edges entirely.
+ *
+ * Per-instance hiding inside a still-visible tile is handled automatically: the LOD wire sidecar
+ * shares the geometry's `itemFilter`, so its vertex shader emits `gl_Position = vec4(0)` for
+ * culled instances and never rasterizes their wireframe edges.
+ *
+ * No worker round-trips, no edge geometry rebuilds — replaces the legacy "kill all edges + draw
+ * a separate selection overlay" path which lost per-element color and added GC churn.
+ */
+export function syncSketchEdgeVisibilityFromLodFilter(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    if (obj.name === CONTEXT_GHOST_SNAPSHOT_NAME) return;
+    const mesh = obj as THREE.Mesh & THREE.InstancedMesh;
+    if (!mesh.isMesh) return;
+    const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+    const filter = geom?.getAttribute("itemFilter") as
+      | THREE.BufferAttribute
+      | THREE.InstancedBufferAttribute
+      | undefined;
+
+    let anyVisible = true;
+    if (filter && filter.count > 0) {
+      const arr = filter.array as ArrayLike<number>;
+      anyVisible = false;
+      for (let i = 0; i < filter.count; i++) {
+        if (Number(arr[i]) >= 1) {
+          anyVisible = true;
+          break;
+        }
+      }
+    }
+
+    for (const ch of mesh.children) {
+      if (ch.name === SKETCH_EDGE_CHILD_NAME) ch.visible = anyVisible;
+    }
+    const wireIm = mesh.userData[SKETCH_INSTANCED_EDGE_USERDATA] as THREE.InstancedMesh | undefined;
+    if (wireIm) wireIm.visible = anyVisible;
+  });
+}
