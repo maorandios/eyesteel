@@ -160,8 +160,13 @@ export default function ViewerPage() {
 
   useEffect(() => {
     if (!engine) return;
-    engine.setViewerTool(viewerTool);
-  }, [engine, viewerTool]);
+    const exitSnap = engine.setViewerTool(viewerTool);
+    if (!exitSnap) return;
+    /** During מצב בדיקה, measurement exit must not touch main מבט store (would force e.g. מבט על from inspection ortho). */
+    if (useInspectionStore.getState().active) return;
+    if (exitSnap.orthoMode !== null) setOrthographicView(exitSnap.orthoMode);
+    else clearViewModeStore();
+  }, [engine, viewerTool, setOrthographicView, clearViewModeStore]);
 
   useEffect(() => {
     if (!file) setViewerTool("none");
@@ -519,9 +524,13 @@ export default function ViewerPage() {
     ) {
       return;
     }
-    if (viewerTool === "measurement") return;
     if (useIsolationStore.getState().isolationMode !== "none") return;
     if (useMultiSelectStore.getState().pickInteractionMode === "multi") return;
+
+    engine.discardMeasurementWorkspaceKeepCamera();
+    if (viewerTool === "measurement") {
+      setViewerTool("none");
+    }
 
     const part = selectedPart as AnalyzerPart;
     const framingRefs = [{ id: part.id, expressId: part.expressId }];
@@ -563,6 +572,7 @@ export default function ViewerPage() {
     const ok = await engine.applyIsolation("isolated", isolateIds, {
       ...isolationApplyOpts,
       focus: false,
+      inspectionReadableSketch: true,
     });
     if (!ok) {
       engine.setInspectionBackdropAndLights(false);
@@ -587,6 +597,7 @@ export default function ViewerPage() {
     isolationApplyOpts,
     setOrthographicView,
     setActiveSheet,
+    setViewerTool,
   ]);
 
   const handleExitPartInspection = useCallback(async () => {
@@ -596,6 +607,10 @@ export default function ViewerPage() {
     }
     const bundle = useInspectionStore.getState().revert;
     useInspectionStore.getState().exit();
+
+    engine.discardMeasurementWorkspaceKeepCamera();
+    setViewerTool("none");
+
     if (!bundle) return;
 
     engine.setInspectionBackdropAndLights(false);
@@ -621,7 +636,7 @@ export default function ViewerPage() {
     useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
 
     engine.setTransparency(useAppStore.getState().transparencyEnabled);
-  }, [engine, reapplyViewFilterIfNeeded, setOrthographicView, clearViewModeStore]);
+  }, [engine, reapplyViewFilterIfNeeded, setOrthographicView, clearViewModeStore, setViewerTool]);
 
   const handleInspectionOrthoView = useCallback(
     (mode: ViewModeId) => {
@@ -1272,8 +1287,7 @@ export default function ViewerPage() {
           !selectedAssembly &&
           !profileGroupDetail &&
           isolationMode === "none" &&
-          pickInteractionMode !== "multi" &&
-          viewerTool !== "measurement"
+          pickInteractionMode !== "multi"
         }
         disabled={!engine}
         onInspect={() => void handleEnterPartInspection()}

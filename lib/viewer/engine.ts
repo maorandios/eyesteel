@@ -39,7 +39,11 @@ import {
   eyePositionFromCenter,
   type ViewModeId,
 } from "@/lib/viewer/view-mode-presets";
-import { pickInspectionViewModeFromBox } from "@/lib/viewer/inspection-view";
+import {
+  boundingBoxHalfExtentsInOrthoCameraPlane,
+  fitOrthoSymmetricFrustum,
+  pickInspectionViewModeFromBox,
+} from "@/lib/viewer/inspection-view";
 import {
   CLIPPING_LABELS_HE,
   type ClippingDirectionId,
@@ -86,6 +90,11 @@ export type ApplyIsolationOptions = {
    * Exporter-spelled bolt GlobalIds from matching link rows (for `getLocalIdsByGuids`).
    */
   relationBoltGlobalIdsRaw?: readonly string[];
+  /**
+   * מצב בדיקה: readable LOD faces (instead of opacity 0) + edge overlay ids = full merged `selected`
+   * so base plates / merged hardware still draw when per-seed `getItemsGeometry` is empty.
+   */
+  inspectionReadableSketch?: boolean;
 };
 
 export type ViewerToolMode = "none" | "measurement";
@@ -98,7 +107,10 @@ const TAP_MAX_MS_TOUCH = 950;
 
 const ORTHO_MARGIN = 1.08;
 /** Tighter framing in מצב בדיקה so the part fills the orthographic view. */
-const INSPECTION_ORTHO_MARGIN = 1.042;
+/** Extra air around AABB in ortho (inspection only), after accurate camera-space fit. */
+const INSPECTION_ORTHO_MARGIN = 1.12;
+/** Sketch + isolated would otherwise use lodOpacity 0 with edges-only — thin plates can vanish if edge geometry is empty. */
+const INSPECTION_SKETCH_LOD_FACE_OPACITY = 0.34;
 const ORTHO_DISTANCE_K = 1.75;
 
 /** Worker batch size for `setVisible` / `setOpacity` on large Tekla models (mobile-safe). */
@@ -145,6 +157,8 @@ export class ViewerEngine {
   private measurementControlsEnabledSnapshot = true;
   /** True only when measurement mode disabled orbit for a coarse-pointer UI; desktop keeps orbiting. */
   private measurementSuppressedControls = false;
+  /** Pose before מצב מדידה — restored on exit so pan/orbit drift does not carry over. */
+  private measurementSessionCameraRevert: ViewerCameraRevertSnapshot | null = null;
   /** Browsers often emit synthetic `pointerType: mouse` after touch; ignore briefly so measurement doesn't double-fire. */
   private suppressPrimaryMouseDownUntilMs = 0;
 
@@ -158,6 +172,8 @@ export class ViewerEngine {
   private orthoResizeHandler: (() => void) | null = null;
   /** White backdrop + dimmed fill lights during מצב בדיקה (restored on exit / dispose). */
   private inspectionPresentationActive = false;
+  /** True only during `applyIsolation` with `inspectionReadableSketch` — avoids pre-isolate full-model face lift. */
+  private inspectionIsolationSketchReadable = false;
   /** World-space bounds used to refit orthographic presets while inspecting (steel-only framing). */
   private inspectionSessionFramingBox: THREE.Box3 | null = null;
   private readonly inspectionSceneBackground = new THREE.Color(0xf7f8fa);
@@ -395,9 +411,48 @@ export class ViewerEngine {
       } else if (this.modelObject) {
         box.setFromObject(this.modelObject);
       }
-      if (!box.isEmpty()) this.updateOrthoFrustum(box);
+      if (box.isEmpty()) return;
+      if (this.inspectionSessionFramingBox !== null && this.activeOrthoViewMode !== null) {
+        this.updateOrthoFrustumForInspectionSnapshot(box);
+      } else {
+        this.updateOrthoFrustum(box);
+      }
     };
     renderer.onResize.add(this.orthoResizeHandler);
+  }
+
+  /**
+   * מצב בדיקה ortho: project framing AABB corners into the **current** camera pose, then grow
+   * `left/right/top/bottom` to match canvas aspect. Must run only after `CameraControls`/`lookAt`
+   * have updated {@link THREE.OrthographicCamera.matrixWorld}.
+   */
+  private updateOrthoFrustumForInspectionSnapshot(box: THREE.Box3): void {
+    this.world.camera.controls?.update(0);
+    const ortho = this.orthographicCamera;
+    ortho.updateMatrixWorld(true);
+
+    const renderer = this.world.renderer as OBF.RendererWith2D;
+    const el = renderer.container;
+    const w = el.clientWidth;
+    const h = el.clientHeight;
+    const viewportAspect = w > 0 && h > 0 ? w / h : 1;
+
+    const { halfX, halfY } = boundingBoxHalfExtentsInOrthoCameraPlane(ortho, box);
+    const { halfWidth, halfHeight } = fitOrthoSymmetricFrustum(
+      halfX,
+      halfY,
+      viewportAspect,
+      INSPECTION_ORTHO_MARGIN,
+    );
+
+    ortho.left = -halfWidth;
+    ortho.right = halfWidth;
+    ortho.bottom = -halfHeight;
+    ortho.top = halfHeight;
+    ortho.near = 0.01;
+    ortho.far = 1e6;
+    ortho.updateProjectionMatrix();
+    this.world.camera.controls?.update(0);
   }
 
   private detachOrthoResizeListener() {
@@ -515,7 +570,14 @@ export class ViewerEngine {
     };
   }
 
-  restoreCameraRevertSnapshot(snapshot: ViewerCameraRevertSnapshot): void {
+  /**
+   * @param options.preserveInspectionSession When true, does not clear {@link inspectionSessionFramingBox}
+   *   (needed when leaving מדידה while still in מצב בדיקה — full exit still uses default and clears it).
+   */
+  restoreCameraRevertSnapshot(
+    snapshot: ViewerCameraRevertSnapshot,
+    options?: { preserveInspectionSession?: boolean },
+  ): void {
     if (this.disposed) return;
     const ctrl = this.world.camera.controls;
     const simpleCam = this.world.camera as OBC.SimpleCamera;
@@ -553,7 +615,7 @@ export class ViewerEngine {
       ctrl.setLookAt(pos.x, pos.y, pos.z, tgt.x, tgt.y, tgt.z, false);
       this.boundUseCamera?.(this.perspectiveCamera);
     }
-    if (this.inspectionSessionFramingBox !== null) {
+    if (!options?.preserveInspectionSession && this.inspectionSessionFramingBox !== null) {
       this.clearInspectionVisualizationSession();
     }
     void this.syncFragmentsAfterCameraSwap();
@@ -646,7 +708,8 @@ export class ViewerEngine {
     const span = Math.max(size.x, size.y, size.z, 1);
     const distance = ORTHO_DISTANCE_K * span;
 
-    this.updateOrthoFrustum(box);
+    /** Must be known before resize refit calls {@link attachOrthoResizeListener}. */
+    this.activeOrthoViewMode = mode;
 
     const simpleCam = this.world.camera as OBC.SimpleCamera;
     const ctrl = simpleCam.controls;
@@ -660,17 +723,22 @@ export class ViewerEngine {
       this.applyOrthographicPlanNavigationBindings(ctrl);
       ortho.zoom = 1;
       void ctrl.zoomTo(ortho.zoom, false);
+      ctrl.stop();
     }
 
-    const eye = eyePositionFromCenter(mode, center, distance, this.tmpVecEye);
     ctrl?.setOrbitPoint(center.x, center.y, center.z);
     ctrl?.updateCameraUp();
-    ctrl?.setLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, false);
+    const eye = eyePositionFromCenter(mode, center, distance, this.tmpVecEye);
+    void ctrl?.setLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, false);
+    ctrl?.setFocalOffset(0, 0, 0, false);
+    ctrl?.stop();
+    ctrl?.update(0);
+
+    this.updateOrthoFrustumForInspectionSnapshot(box);
 
     this.boundUseCamera?.(ortho);
     void this.syncFragmentsAfterCameraSwap();
 
-    this.activeOrthoViewMode = mode;
     this.attachOrthoResizeListener();
     return true;
   }
@@ -1077,7 +1145,10 @@ export class ViewerEngine {
             if (!isLodFragmentMaterial(m)) continue;
             const mat = m as THREE.Material & { lodOpacity: number };
             if (!this.sketchLodOpacityBackup.has(m)) this.sketchLodOpacityBackup.set(m, mat.lodOpacity);
-            mat.lodOpacity = 0;
+            mat.lodOpacity =
+              this.inspectionPresentationActive && this.inspectionIsolationSketchReadable
+                ? INSPECTION_SKETCH_LOD_FACE_OPACITY
+                : 0;
           }
         } else {
           if (!fill) return;
@@ -1355,13 +1426,23 @@ export class ViewerEngine {
     if (host) host.style.touchAction = "none";
   }
 
-  /** Measurement on touch: orbit off so gestures don't fight taps. Desktop: keep orbiting when allowed. */
-  setViewerTool(tool: ViewerToolMode) {
-    if (this.disposed) return;
-    this.viewerTool = tool;
+  /**
+   * Activates/deactivates מצב מדידה. On exit from measurement: clears overlays/lines plus restores the
+   * camera/frustum from before measurement (pan/zoom drift must not persist). Returns the snapshot applied
+   * on exit so the host can sync orthographic toolbar state ({@link ViewerCameraRevertSnapshot.orthoMode}).
+   */
+  setViewerTool(tool: ViewerToolMode): ViewerCameraRevertSnapshot | undefined {
+    if (this.disposed) return undefined;
+    const prevTool = this.viewerTool;
     const ctrl = this.world.camera.controls;
 
+    let measurementExitRestoredSnap: ViewerCameraRevertSnapshot | undefined;
+
     if (tool === "measurement") {
+      if (prevTool !== "measurement") {
+        this.measurementSessionCameraRevert = this.captureCameraRevertSnapshot();
+      }
+      this.viewerTool = tool;
       if (ctrl && MeasurementController.prefersTouchLikeMeasurement()) {
         this.measurementControlsEnabledSnapshot = ctrl.enabled;
         ctrl.enabled = false;
@@ -1370,16 +1451,60 @@ export class ViewerEngine {
       this.reinstateCanvasTouchBlocking();
       this.measurementController.activate();
     } else {
+      if (prevTool === "measurement") {
+        this.measurementController.clearAll();
+        const revert = this.measurementSessionCameraRevert;
+        if (revert !== null) {
+          measurementExitRestoredSnap = revert;
+          const insideInspection = this.isInspectionVisualizationSessionActive();
+          this.restoreCameraRevertSnapshot(revert, {
+            preserveInspectionSession: insideInspection,
+          });
+          /** After מדידה inside מצב בדיקה the ortho frustum may need refit once camera pose is back. */
+          if (insideInspection && this.inspectionSessionFramingBox && !this.inspectionSessionFramingBox.isEmpty()) {
+            this.updateOrthoFrustumForInspectionSnapshot(this.inspectionSessionFramingBox);
+          }
+          this.measurementSessionCameraRevert = null;
+          const c = this.world.camera.controls;
+          /** CameraControls accumulates focal offset during pan trucks — revert snapshot alone keeps odd orbit feel. */
+          c?.setFocalOffset(0, 0, 0, false);
+          void c?.stop?.();
+          c?.update?.(0);
+        }
+      }
+      this.viewerTool = tool;
       this.measurementController.deactivate();
       if (ctrl && this.measurementSuppressedControls) {
         ctrl.enabled = this.measurementControlsEnabledSnapshot;
         this.measurementSuppressedControls = false;
       }
     }
+    return measurementExitRestoredSnap;
   }
 
   getViewerTool(): ViewerToolMode {
     return this.viewerTool;
+  }
+
+  /**
+   * Clears overlays, badges, revert snapshot, and measurement tool WITHOUT moving the camera.
+   * Use when crossing מצב בדיקה ↔ model so the inspection bundle stays the only authority on pose.
+   */
+  discardMeasurementWorkspaceKeepCamera(): void {
+    if (this.disposed) return;
+    this.measurementSessionCameraRevert = null;
+    this.measurementController.clearAll();
+    if (this.viewerTool === "measurement") {
+      const ctrl = this.world.camera.controls;
+      if (ctrl && this.measurementSuppressedControls) {
+        ctrl.enabled = this.measurementControlsEnabledSnapshot;
+        this.measurementSuppressedControls = false;
+      }
+      this.measurementController.deactivate();
+      this.viewerTool = "none";
+    } else {
+      this.measurementController.deactivate();
+    }
   }
 
   clearMeasurements() {
@@ -1513,6 +1638,9 @@ export class ViewerEngine {
         this.commitMeasurementTap(canvas, useX, useY, event);
         return;
       }
+
+      /** מצב בדיקה: no model picks — drilling into bolts/sub-features would re-isolate and hide the part. */
+      if (this.isInspectionVisualizationSessionActive()) return;
 
       if (!this.pickCallback) return;
 
@@ -2797,6 +2925,8 @@ export class ViewerEngine {
     }
     const doFocus = options?.focus !== false;
 
+    this.inspectionIsolationSketchReadable = false;
+
     this.clearContextMainThreadVisuals();
     this.clearHiddenRemainderSketchDebounceTimer();
     if (mode !== "hidden") {
@@ -2903,6 +3033,9 @@ export class ViewerEngine {
     const map = this.bboxMapFromLocalSet(selected);
 
     if (mode === "isolated") {
+      if (options?.inspectionReadableSketch === true) {
+        this.inspectionIsolationSketchReadable = true;
+      }
       const toHide = allIds.filter((id) => !selected.has(id));
       await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
       this.isolationVisualMode = "isolated";
@@ -2919,14 +3052,20 @@ export class ViewerEngine {
        * them globally above and draw the picked outline as a per-item overlay built from
        * `getItemsGeometry` — same source the context mode overlay uses.
        */
+      const edgeOverlayLocals =
+        options?.inspectionReadableSketch === true ? [...selected] : coreEdgeOverlayLocals;
+
       if (this.modelObject) {
         this.pickedEdgeOverlay = await buildPickedEdgeOverlay(
           fragModel,
           this.modelObject,
-          coreEdgeOverlayLocals,
+          edgeOverlayLocals,
           this.sketchEdgeMaterialPool,
         );
         this.modelObject.add(this.pickedEdgeOverlay);
+      }
+      if (options?.inspectionReadableSketch === true) {
+        this.applySketchModeVisuals(this.sketchModeEnabled);
       }
       return true;
     }
@@ -2994,6 +3133,7 @@ export class ViewerEngine {
   clearIsolationVisuals(): Promise<void> {
     return this.enqueueIsolation(async () => {
       try {
+        this.inspectionIsolationSketchReadable = false;
         this.clearContextMainThreadVisuals();
         this.shutdownHiddenRemainderSketchState();
         this.isolationVisualMode = "none";
@@ -3257,6 +3397,7 @@ export class ViewerEngine {
         this.measurementSuppressedControls = false;
       }
       this.viewerTool = "none";
+      this.measurementSessionCameraRevert = null;
       this.measurementController.shutdown();
       this.detachSketchTilesListener();
       if (this.activeOrthoViewMode !== null) {

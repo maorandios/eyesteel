@@ -34,7 +34,7 @@ function silenceLengthMeasurement(m: OBF.LengthMeasurement | null) {
 
 /**
  * Two‑point smart measurement: direct, vertical (along scene up), and horizontal span.
- * Snapping uses fragment LINE / POINT / FACE (vertices + edges + faces).
+ * Snapping uses fragment LINE / POINT / FACE via ThatOpen raycast resolution (.vertex‑centric default).
  */
 export class MeasurementController {
   private readonly components: OBC.Components;
@@ -146,6 +146,40 @@ export class MeasurementController {
     }
   }
 
+  private async measurePickWorldAsync(ndc: THREE.Vector2): Promise<THREE.Vector3 | null> {
+    const world = this.attachedWorld;
+    if (!world) return null;
+
+    const rendererLike = world.renderer as { needsUpdate?: boolean; update?: () => void };
+    if (rendererLike && typeof rendererLike.needsUpdate === "boolean") {
+      rendererLike.needsUpdate = true;
+      rendererLike.update?.();
+    }
+
+    const raycaster = this.components.get(OBC.Raycasters).get(world);
+    try {
+      const snapHit = (await raycaster.castRay({
+        snappingClasses: SNAPS,
+        position: ndc,
+      })) as SnapRayHit | null;
+      if (snapHit) {
+        const w = worldPointFromSnapHit(snapHit);
+        if (w) return w;
+      }
+    } catch {
+      /* continue to coarse ray */
+    }
+
+    try {
+      const coarse = raycaster.castRayToObjects(undefined, ndc);
+      if (coarse?.point) return coarse.point.clone();
+    } catch {
+      /* noop */
+    }
+
+    return null;
+  }
+
   private async runHover(ndc: THREE.Vector2) {
     const world = this.attachedWorld;
     if (!world || !this.overlay || !this.active) return;
@@ -156,13 +190,7 @@ export class MeasurementController {
         rendererLike.needsUpdate = true;
         rendererLike.update?.();
       }
-      const raycaster = this.components.get(OBC.Raycasters).get(world);
-      const hit = await raycaster.castRay({
-        snappingClasses: SNAPS,
-        position: ndc,
-      });
-      const snapHit = hit as SnapRayHit | null;
-      this.hoverWorld = snapHit ? worldPointFromSnapHit(snapHit) : null;
+      this.hoverWorld = await this.measurePickWorldAsync(ndc);
 
       const canvas = world.renderer?.three?.domElement;
       const camera = world.camera?.three;
@@ -250,13 +278,7 @@ export class MeasurementController {
       rendererLike.update?.();
     }
 
-    const raycaster = this.components.get(OBC.Raycasters).get(world);
-    const hit = await raycaster.castRay({
-      snappingClasses: SNAPS,
-      position: ndc,
-    });
-    const snapHit = hit as SnapRayHit | null;
-    const p = snapHit ? worldPointFromSnapHit(snapHit) : null;
+    const p = await this.measurePickWorldAsync(ndc);
     if (!p) {
       useSmartMeasureStore.getState().setHint("לא נמצאה נקודת הצמדה — נסה קרוב לקודקוד או לקצה");
       return;

@@ -276,7 +276,7 @@ export async function buildPickedEdgeOverlay(
         const lines = new THREE.LineSegments(edgesGeom, lineMat);
         lines.name = `${rootName}-line`;
         lines.raycast = () => {};
-        lines.frustumCulled = true;
+        lines.frustumCulled = false;
         /** Above the dimmed main-view edges (renderOrder 1) and ghost faces (renderOrder -10). */
         lines.renderOrder = 2;
         group.add(lines);

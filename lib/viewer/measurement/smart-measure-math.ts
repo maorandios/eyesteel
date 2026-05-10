@@ -34,11 +34,14 @@ export type SnapRayHit = THREE.Intersection & {
   snappingClass?: number;
   snappedEdgeP1?: THREE.Vector3;
   snappedEdgeP2?: THREE.Vector3;
+  facePoints?: Float32Array;
 };
 
 /**
  * LINE snaps expose segment endpoints — bias toward nearest endpoint when the pick is near an end
  * (edge‑to‑edge); otherwise use the closest point on the edge (`hit.point`).
+ *
+ * POINT / combined ThatOpen snapping strongly favours vertices elsewhere in the resolver path.
  */
 export function worldPointFromSnapHit(hit: SnapRayHit): THREE.Vector3 | null {
   if (!hit.point) return null;
