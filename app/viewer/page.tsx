@@ -20,7 +20,7 @@ import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { useViewerViewStore } from "@/lib/state/viewer-view-store";
 import { useIsolationStore } from "@/lib/state/isolation-store";
 import { useMultiSelectStore } from "@/lib/state/multi-select-store";
-import { ViewerEngine } from "@/lib/viewer/engine";
+import { ViewerEngine, type ApplyIsolationOptions } from "@/lib/viewer/engine";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import { he } from "@/lib/i18n/he";
@@ -319,6 +319,11 @@ export default function ViewerPage() {
 
   useViewFilterSync(engine, analyzerData, loadingState);
 
+  const hideAllFastenersKeepHoles = useViewFilterStore((s) => s.hideAllFastenersKeepHoles);
+  const toggleHideAllFastenersKeepHoles = useViewFilterStore(
+    (s) => s.toggleHideAllFastenersKeepHoles,
+  );
+
   const assemblyRollupAll = useMemo(
     () => aggregateAssembliesByMark(analyzerData?.assemblies ?? []),
     [analyzerData?.assemblies],
@@ -421,17 +426,19 @@ export default function ViewerPage() {
       Object.keys(vf.hiddenAssemblyKeys).length === 0 &&
       Object.keys(vf.hiddenPartIds).length === 0 &&
       Object.keys(vf.hiddenPartTabGroupKeys).length === 0 &&
-      Object.keys(vf.hiddenProfileTabGroupKeys).length === 0
+      Object.keys(vf.hiddenProfileTabGroupKeys).length === 0 &&
+      !vf.hideAllFastenersKeepHoles
     ) {
       return;
     }
-    const hidden = await resolveViewFilterHiddenLocals(eng, data, {
+    const { structuralHidden, fastenerHidden } = await resolveViewFilterHiddenLocals(eng, data, {
       hiddenAssemblyKeys: vf.hiddenAssemblyKeys,
       hiddenPartIds: vf.hiddenPartIds,
       hiddenPartTabGroupKeys: vf.hiddenPartTabGroupKeys,
       hiddenProfileTabGroupKeys: vf.hiddenProfileTabGroupKeys,
+      hideAllFastenersKeepHoles: vf.hideAllFastenersKeepHoles,
     });
-    await eng.applyViewVisibilityFilter(hidden);
+    await eng.applyViewVisibilityFilter(structuralHidden, fastenerHidden);
   }, []);
 
   /**
@@ -454,11 +461,30 @@ export default function ViewerPage() {
     [reapplyViewFilterIfNeeded],
   );
 
-  /**
-   * No analyzer GUID allowlists: fragment GlobalIds often disagree with JSON, so strict sets dropped
-   * all hardware. Isolation uses IFC graph + padded bbox in the viewer engine instead.
-   */
-  const isolationApplyOpts = useMemo(() => ({ focus: true as const }), []);
+  const isolationApplyOpts = useMemo((): ApplyIsolationOptions => {
+    const base: ApplyIsolationOptions = { focus: true };
+    if (!partIsolationBoltPolicy) return base;
+    if (
+      partIsolationBoltPolicy.boltGuidIsolationAllowlist &&
+      partIsolationBoltPolicy.boltGuidIsolationAllowlist.size > 0
+    ) {
+      base.boltGuidIsolationAllowlist = partIsolationBoltPolicy.boltGuidIsolationAllowlist;
+    }
+    if (partIsolationBoltPolicy.spatialBoltIsolationAllowlist !== undefined) {
+      base.spatialBoltIsolationAllowlist =
+        partIsolationBoltPolicy.spatialBoltIsolationAllowlist;
+    }
+    if (partIsolationBoltPolicy.useIfcBoltSteelRelationIsolation) {
+      base.useIfcBoltSteelRelationIsolation = true;
+    }
+    if (
+      partIsolationBoltPolicy.relationBoltGlobalIdsRaw &&
+      partIsolationBoltPolicy.relationBoltGlobalIdsRaw.length > 0
+    ) {
+      base.relationBoltGlobalIdsRaw = partIsolationBoltPolicy.relationBoltGlobalIdsRaw;
+    }
+    return base;
+  }, [partIsolationBoltPolicy]);
 
   const handleIsolationIsolate = useCallback(async () => {
     if (!engine) return;
@@ -1091,6 +1117,10 @@ export default function ViewerPage() {
           loadingState === "ready" && analyzerData
             ? () => setActiveSheet("filter")
             : undefined
+        }
+        hideFastenersKeepHoles={hideAllFastenersKeepHoles}
+        onToggleHideFastenersKeepHoles={
+          loadingState === "ready" ? toggleHideAllFastenersKeepHoles : undefined
         }
         onGlobalSearch={
           loadingState === "ready" && analyzerData ? () => setGlobalSearchOpen(true) : undefined

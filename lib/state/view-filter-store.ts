@@ -10,6 +10,10 @@ export type ViewFilterState = {
   hiddenPartTabGroupKeys: Record<string, boolean>;
   /** סינון פרופילים — מפתח שורת פרופיל (תווית פרופיל). */
   hiddenProfileTabGroupKeys: Record<string, boolean>;
+  /**
+   * When true (√ בורג), mechanical fasteners disappear but opening/void items stay visible (hole locations).
+   */
+  hideAllFastenersKeepHoles: boolean;
   toggleAssemblyKey: (key: string) => void;
   togglePartId: (partId: string) => void;
   togglePartTabGroupKey: (key: string) => void;
@@ -18,6 +22,7 @@ export type ViewFilterState = {
   isPartHidden: (partId: string) => boolean;
   isPartTabGroupHidden: (key: string) => boolean;
   isProfileTabGroupHidden: (key: string) => boolean;
+  toggleHideAllFastenersKeepHoles: () => void;
   reset: () => void;
 };
 
@@ -26,6 +31,7 @@ const initial = {
   hiddenPartIds: {} as Record<string, boolean>,
   hiddenPartTabGroupKeys: {} as Record<string, boolean>,
   hiddenProfileTabGroupKeys: {} as Record<string, boolean>,
+  hideAllFastenersKeepHoles: false,
 };
 
 export const useViewFilterStore = create<ViewFilterState>((set, get) => ({
@@ -62,5 +68,7 @@ export const useViewFilterStore = create<ViewFilterState>((set, get) => ({
   isPartHidden: (partId) => Boolean(get().hiddenPartIds[partId]),
   isPartTabGroupHidden: (key) => Boolean(get().hiddenPartTabGroupKeys[key]),
   isProfileTabGroupHidden: (key) => Boolean(get().hiddenProfileTabGroupKeys[key]),
+  toggleHideAllFastenersKeepHoles: () =>
+    set((s) => ({ hideAllFastenersKeepHoles: !s.hideAllFastenersKeepHoles })),
   reset: () => set(initial),
 }));

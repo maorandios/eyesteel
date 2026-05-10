@@ -36,6 +36,7 @@ export function useViewFilterSync(
       .sort()
       .join("\0"),
   );
+  const hideAllFastenersKeepHoles = useViewFilterStore((s) => s.hideAllFastenersKeepHoles);
 
   const gen = useRef(0);
 
@@ -50,19 +51,29 @@ export function useViewFilterSync(
       await engine.clearHighlight();
       if (my !== gen.current) return;
       const filter = useViewFilterStore.getState();
-      const hidden = await resolveViewFilterHiddenLocals(engine, analyzerData, {
+      const { structuralHidden, fastenerHidden } = await resolveViewFilterHiddenLocals(engine, analyzerData, {
         hiddenAssemblyKeys: filter.hiddenAssemblyKeys,
         hiddenPartIds: filter.hiddenPartIds,
         hiddenPartTabGroupKeys: filter.hiddenPartTabGroupKeys,
         hiddenProfileTabGroupKeys: filter.hiddenProfileTabGroupKeys,
+        hideAllFastenersKeepHoles: filter.hideAllFastenersKeepHoles,
       });
       if (my !== gen.current) return;
-      await engine.applyViewVisibilityFilter(hidden);
+      await engine.applyViewVisibilityFilter(structuralHidden, fastenerHidden);
     };
 
     void run();
     return () => {
       gen.current++;
     };
-  }, [engine, loadingState, analyzerData, assemblySig, partSig, partTabSig, profileTabSig]);
+  }, [
+    engine,
+    loadingState,
+    analyzerData,
+    assemblySig,
+    partSig,
+    partTabSig,
+    profileTabSig,
+    hideAllFastenersKeepHoles,
+  ]);
 }

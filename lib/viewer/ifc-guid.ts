@@ -166,6 +166,27 @@ export function normalizedBoltSteelGuidsForBoltLinkReach(
   return out;
 }
 
+/** Preserve exporter GlobalId spelling for {@link FragmentsModel.getLocalIdsByGuids}. */
+export function boltGlobalIdsRawForBoltLinkReach(
+  partId: string,
+  assemblies: readonly { parts: { id: string }[] }[],
+  boltSteelLinks: readonly { boltGlobalId: string; partGlobalId: string }[] | undefined,
+): string[] {
+  const reach = steelPartKeysReachableViaBoltLinkGraph(partId, assemblies, boltSteelLinks);
+  const seenNorm = new Set<string>();
+  const out: string[] = [];
+  for (const row of boltSteelLinks ?? []) {
+    if (!reach.has(normalizedPartSteelKey(row.partGlobalId))) continue;
+    const raw = row.boltGlobalId.trim();
+    if (!raw) continue;
+    const nk = normalizeIfcGuidKey(raw) ?? raw;
+    if (seenNorm.has(nk)) continue;
+    seenNorm.add(nk);
+    out.push(raw);
+  }
+  return out;
+}
+
 /**
  * Bolt GUID keys whose `boltSteelLinks` rows reference **any co-assembly mate** (including self).
  * Narrower than {@link normalizedBoltSteelGuidsForBoltLinkReach}.
@@ -237,18 +258,35 @@ export type PartIsolationBoltPolicy = {
    * optional assembly bolt GUID pools only gate which IFC fasteners the engine may merge from those seeds.
    */
   refs: AnalyzerHighlightRef[];
-  /** Candidates for IFC relation merge (filtered by reachability from seeds on the viewer side). */
+  /**
+   * Normalized bolt GlobalIds the analyzer tied to this part via `IfcRelConnects*` (`boltSteelLinks`),
+   * including hypergraph reach for multi-piece joints. When non-empty, the viewer treats isolation
+   * hardware as **relation-backed** (no spatial assembly flood).
+   */
   boltGuidIsolationAllowlist?: ReadonlySet<string>;
-  /** Same candidate pool as graph allowlist for isolation bbox merge (see policy resolver). */
+  /**
+   * Legacy / non-link models: optional spatial pool; omitted when using relation-only isolation.
+   */
   spatialBoltIsolationAllowlist?: ReadonlySet<string>;
+  /**
+   * True when `boltSteelLinks` drives {@link boltGuidIsolationAllowlist} (IFC-explicit bolt↔steel).
+   */
+  useIfcBoltSteelRelationIsolation: boolean;
+  /**
+   * Original `boltGlobalId` strings from matching link rows — used to resolve fragments when the
+   * normalized key alone does not satisfy `getLocalIdsByGuids`.
+   */
+  relationBoltGlobalIdsRaw?: readonly string[];
 };
 
 /**
  * Part isolation seeds = `{ part }`.
  *
- * **Candidate bolt GUID pool** = assembly `bolts[]` **∪** {@link normalizedBoltSteelGuidsForBoltLinkReach}
- * **∪** link rows touching the **assembly steel catalog** (see
- * `normalizedBoltSteelGuidsForLinksTouchingAssemblyCatalog`). One pool drives graph + bbox merge.
+ * When **`boltSteelLinks` exists:** allowlist = {@link normalizedBoltSteelGuidsForBoltLinkReach} only
+ * (IfcRelConnects* provenance). No assembly-wide bolt index or catalog union — that caused unrelated
+ * assembly hardware. Spatial merge is skipped by the engine in this mode.
+ *
+ * When **no link table:** fall back to assembly `bolts[]` and enable spatial pool for bbox recovery.
  */
 export function resolvePartIsolationBoltPolicy(
   part: { id: string; expressId: number | null },
@@ -264,22 +302,32 @@ export function resolvePartIsolationBoltPolicy(
     assemblies,
     boltSteelLinks,
   );
-  const fromCatalogLinks = normalizedBoltSteelGuidsForLinksTouchingAssemblyCatalog(
-    part.id,
-    assemblies,
-    boltSteelLinks,
-  );
+  const hasLinkTable = Array.isArray(boltSteelLinks) && boltSteelLinks.length > 0;
 
-  const graphPool = new Set<string>();
-  for (const k of fromAsm) graphPool.add(k);
-  for (const k of fromLinkReach) graphPool.add(k);
-  for (const k of fromCatalogLinks) graphPool.add(k);
+  let boltGuidIsolationAllowlist: ReadonlySet<string> | undefined;
+  let spatialBoltIsolationAllowlist: ReadonlySet<string> | undefined;
+  let useIfcBoltSteelRelationIsolation = false;
+  let relationBoltGlobalIdsRaw: string[] | undefined;
 
-  const boltGuidIsolationAllowlist =
-    graphPool.size > 0 ? graphPool : undefined;
-
-  const spatialBoltIsolationAllowlist =
-    graphPool.size > 0 ? new Set<string>(graphPool) : undefined;
+  if (hasLinkTable) {
+    useIfcBoltSteelRelationIsolation = true;
+    if (fromLinkReach.size > 0) {
+      boltGuidIsolationAllowlist = fromLinkReach;
+      relationBoltGlobalIdsRaw = boltGlobalIdsRawForBoltLinkReach(
+        part.id,
+        assemblies,
+        boltSteelLinks,
+      );
+    } else if (fromAsm.size > 0) {
+      /** Link table present but no rows reached this part — keep assembly index only. */
+      useIfcBoltSteelRelationIsolation = false;
+      boltGuidIsolationAllowlist = fromAsm;
+      spatialBoltIsolationAllowlist = new Set<string>(fromAsm);
+    }
+  } else if (fromAsm.size > 0) {
+    boltGuidIsolationAllowlist = fromAsm;
+    spatialBoltIsolationAllowlist = new Set<string>(fromAsm);
+  }
 
   const refs: AnalyzerHighlightRef[] = [{ id: part.id, expressId: part.expressId }];
 
@@ -287,6 +335,8 @@ export function resolvePartIsolationBoltPolicy(
     refs,
     boltGuidIsolationAllowlist,
     spatialBoltIsolationAllowlist,
+    useIfcBoltSteelRelationIsolation,
+    relationBoltGlobalIdsRaw,
   };
 }
 
@@ -301,15 +351,29 @@ export function resolveProfileIsolationBoltPolicy(
   const unionBoltAllow = new Set<string>();
   const unionLinkSpatial = new Set<string>();
   const refAcc: AnalyzerHighlightRef[] = [];
+  const unionRawBolts: string[] = [];
+  const seenNorm = new Set<string>();
+  const hasLinkTable = Array.isArray(boltSteelLinks) && boltSteelLinks.length > 0;
+  let useIfcBoltSteelRelationIsolation =
+    instances.length > 0 && hasLinkTable;
 
   for (const p of instances) {
     const pol = resolvePartIsolationBoltPolicy(p, assemblies, boltSteelLinks);
+    useIfcBoltSteelRelationIsolation &&= pol.useIfcBoltSteelRelationIsolation;
     for (const r of pol.refs) refAcc.push(r);
     if (pol.boltGuidIsolationAllowlist) {
       for (const g of pol.boltGuidIsolationAllowlist) unionBoltAllow.add(g);
     }
     if (pol.spatialBoltIsolationAllowlist) {
       for (const g of pol.spatialBoltIsolationAllowlist) unionLinkSpatial.add(g);
+    }
+    if (pol.relationBoltGlobalIdsRaw?.length) {
+      for (const raw of pol.relationBoltGlobalIdsRaw) {
+        const nk = normalizeIfcGuidKey(raw) ?? raw.trim();
+        if (!nk || seenNorm.has(nk)) continue;
+        seenNorm.add(nk);
+        unionRawBolts.push(raw.trim());
+      }
     }
   }
 
@@ -318,5 +382,7 @@ export function resolveProfileIsolationBoltPolicy(
     boltGuidIsolationAllowlist: unionBoltAllow.size > 0 ? unionBoltAllow : undefined,
     spatialBoltIsolationAllowlist:
       unionLinkSpatial.size > 0 ? unionLinkSpatial : undefined,
+    useIfcBoltSteelRelationIsolation,
+    relationBoltGlobalIdsRaw: unionRawBolts.length > 0 ? unionRawBolts : undefined,
   };
 }

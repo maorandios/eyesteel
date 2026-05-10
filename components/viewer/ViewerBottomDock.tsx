@@ -23,6 +23,9 @@ interface Props {
   onSelectionModeChange: (mode: SelectionMode) => void;
   onDashboard: () => void;
   onViewFilter?: () => void;
+  /** הבורג: hide mechanical fasteners globally; openings/voids stay visible */
+  hideFastenersKeepHoles?: boolean;
+  onToggleHideFastenersKeepHoles?: () => void;
   onGlobalSearch?: () => void;
   measurementActive: boolean;
   onMeasurementToggle: () => void;
@@ -54,6 +57,8 @@ export function ViewerBottomDock({
   onSelectionModeChange,
   onDashboard,
   onViewFilter,
+  hideFastenersKeepHoles = false,
+  onToggleHideFastenersKeepHoles,
   onGlobalSearch,
   measurementActive,
   onMeasurementToggle,
@@ -176,6 +181,23 @@ export function ViewerBottomDock({
             onClick={onViewFilter}
           >
             סינון תצוגה
+          </Button>
+        )}
+
+        {onToggleHideFastenersKeepHoles && (
+          <Button
+            type="button"
+            variant={hideFastenersKeepHoles ? "default" : "secondary"}
+            className={cn(
+              "h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm",
+              hideFastenersKeepHoles &&
+                "ring-2 ring-amber-400/80 ring-offset-2 ring-offset-zinc-950",
+            )}
+            aria-pressed={hideFastenersKeepHoles}
+            title="כבוי: הצג מהדקים ובורגים. מופעל: הסתר רכיבי הידוק מהתצוגה ושמור על מיקום חריצים ופתחים"
+            onClick={onToggleHideFastenersKeepHoles}
+          >
+            בורג
           </Button>
         )}
 

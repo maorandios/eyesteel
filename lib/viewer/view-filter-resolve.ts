@@ -8,23 +8,31 @@ import {
   aggregateSteelPartsForModelTab,
 } from "@/components/viewer/SelectionPickDetails";
 
-type FilterPick = {
+export type ViewFilterPick = {
   hiddenAssemblyKeys: Record<string, boolean>;
   hiddenPartIds: Record<string, boolean>;
   hiddenPartTabGroupKeys: Record<string, boolean>;
   hiddenProfileTabGroupKeys: Record<string, boolean>;
+  /** הבורג: fastener overlay — openings are not propagated from these ids in the engine. */
+  hideAllFastenersKeepHoles?: boolean;
+};
+
+/** Structural picks vs בורג overlay — openings merge only from {@link structuralHidden}. */
+export type ViewFilterHiddenLocals = {
+  structuralHidden: Set<number>;
+  fastenerHidden: Set<number>;
 };
 
 /**
- * Resolves analyzer + filter picks to fragment local ids for `setVisible(..., false)`.
- * Union of assembly-group hides and per-part hides (overlapping ids are fine).
+ * Resolves analyzer + filter picks to fragment local ids for visibility.
+ * Structural set gets `HasOpenings` expansion in the engine; fastener set does not (holes stay visible).
  */
 export async function resolveViewFilterHiddenLocals(
   engine: ViewerEngine,
   analyzerData: AnalyzerOutput,
-  filter: FilterPick,
-): Promise<Set<number>> {
-  const out = new Set<number>();
+  filter: ViewFilterPick,
+): Promise<ViewFilterHiddenLocals> {
+  const structuralHidden = new Set<number>();
   const asmKeys = Object.keys(filter.hiddenAssemblyKeys);
   const partIds = Object.keys(filter.hiddenPartIds);
   const partTabKeys = Object.keys(filter.hiddenPartTabGroupKeys);
@@ -41,7 +49,7 @@ export async function resolveViewFilterHiddenLocals(
       for (const inst of row.instances) {
         const refs = analyzerRefsFromAssembly(inst);
         const set = await engine.resolveIsolationLocalIds(refs);
-        set.forEach((id) => out.add(id));
+        set.forEach((id) => structuralHidden.add(id));
       }
     }
   }
@@ -49,7 +57,7 @@ export async function resolveViewFilterHiddenLocals(
   const pushPartLocals = async (parts: AnalyzerPart[]) => {
     for (const p of parts) {
       const set = await engine.resolveIsolationLocalIds([{ id: p.id, expressId: p.expressId }]);
-      set.forEach((id) => out.add(id));
+      set.forEach((id) => structuralHidden.add(id));
     }
   };
 
@@ -81,5 +89,11 @@ export async function resolveViewFilterHiddenLocals(
     }
   }
 
-  return out;
+  const fastenerHidden = new Set<number>();
+  if (filter.hideAllFastenersKeepHoles) {
+    const fasteners = await engine.resolveMechanicalFastenerLocalsToHide();
+    for (const id of fasteners) fastenerHidden.add(id);
+  }
+
+  return { structuralHidden, fastenerHidden };
 }
