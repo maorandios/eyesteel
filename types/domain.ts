@@ -104,7 +104,14 @@ export interface AnalyzerAssembly {
   bolts?: AnalyzerBoltRow[];
 }
 
+/** From IFC `IfcRelConnects*` fastener ↔ structural part (supports multi-beam bolts). */
+export interface AnalyzerBoltSteelLink {
+  boltGlobalId: string;
+  partGlobalId: string;
+}
+
 export interface AnalyzerOutput {
   assemblies: AnalyzerAssembly[];
   parts: AnalyzerIndexedEntity[];
+  boltSteelLinks?: AnalyzerBoltSteelLink[];
 }

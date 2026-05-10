@@ -52,6 +52,21 @@ export interface PickHit {
   itemId: number;
 }
 
+export type ApplyIsolationOptions = {
+  focus?: boolean;
+  /**
+   * When set, mechanical fasteners must match these normalized IFC GlobalIds before merge.
+   * Omit for part/profile isolation if analyzer JSON and fragment GUIDs disagree (common); then
+   * only category + IFC relation graph apply in {@link mergeBoltHoleConnectionLocals}.
+   */
+  boltGuidIsolationAllowlist?: ReadonlySet<string>;
+  /**
+   * When set, bbox fastener merge additionally filters by GUID. **Omit** to keep every fastener
+   * category hit inside the padded isolation probe (paired with graph merge).
+   */
+  spatialBoltIsolationAllowlist?: ReadonlySet<string>;
+};
+
 export type ViewerToolMode = "none" | "measurement";
 
 /** Tap classification — fingers jitter more than mouse cursors. */
@@ -65,6 +80,11 @@ const ORTHO_DISTANCE_K = 1.75;
 
 /** Worker batch size for `setVisible` / `setOpacity` on large Tekla models (mobile-safe). */
 const ISOLATION_WORKER_CHUNK = 384;
+
+/**
+ * Loose category match for spatial queries — supplements IFC graph when exporters omit connects.
+ */
+const FASTENER_ITEMS_BY_QUERY_REGEX: RegExp[] = [/MECHANICALFASTENER/i, /\bIFCFASTENER\b/i, /DISCRETEACCESSORY/i];
 
 export class ViewerEngine {
   private readonly container: HTMLDivElement;
@@ -1533,6 +1553,261 @@ export class ViewerEngine {
     return { [this.modelId]: new Set(selected) };
   }
 
+  /**
+   * Adds opening / void fragment locals linked via IFC `HasOpenings` (`IfcRelVoidsElement`) so they
+   * stay visible with isolated hosts and hide together with hosts in view filter / isolation‑hidden.
+   */
+  private async mergeHostedOpeningLocalIds(
+    fragModel: FragmentsModel,
+    locals: Set<number>,
+    validLocals: ReadonlySet<number>,
+  ): Promise<void> {
+    if (locals.size === 0) return;
+    const relConfig = {
+      attributesDefault: true,
+      relationsDefault: { attributes: false, relations: false },
+      relations: {
+        HasOpenings: { attributes: true, relations: true },
+      },
+    };
+    const CHUNK = 96;
+    const seeds = [...locals];
+    for (let i = 0; i < seeds.length; i += CHUNK) {
+      const slice = seeds.slice(i, i + CHUNK);
+      try {
+        const dataRows = await fragModel.getItemsData(slice, relConfig);
+        const foundLocals = new Set<number>();
+        const foundGuids = new Set<string>();
+        const roots = Array.isArray(dataRows) ? dataRows : [];
+        this.collectIdsAndGuidsFromItemDataRoot(roots, foundLocals, foundGuids, 8000);
+        for (const lid of foundLocals) {
+          if (validLocals.has(lid)) locals.add(lid);
+        }
+        if (foundGuids.size === 0) continue;
+        const gArr = [...foundGuids];
+        for (let j = 0; j < gArr.length; j += CHUNK) {
+          const gSlice = gArr.slice(j, j + CHUNK);
+          try {
+            const lidArr = await fragModel.getLocalIdsByGuids(gSlice);
+            for (let k = 0; k < lidArr.length; k++) {
+              const loc = lidArr[k];
+              if (typeof loc === "number" && Number.isFinite(loc) && validLocals.has(loc)) {
+                locals.add(loc);
+              }
+            }
+          } catch {
+            /* ignore guid chunk */
+          }
+        }
+      } catch {
+        /* ignore local id chunk */
+      }
+    }
+  }
+
+  /** Washers / ancillary hardware: not usually listed in bolt–steel link extract; allow via graph from an allowed bolt. */
+  private isDiscreteAccessoryCategory(categoryRaw: string | undefined): boolean {
+    const c = (categoryRaw ?? "").toUpperCase();
+    return c.includes("DISCRETEACCESSORY");
+  }
+
+  /** Match-only: steel neighbour parts explicitly excluded (`IfcBeam`, `IfcPlate`, … stay off isolation). */
+  private isBoltHoleConnectionCompanionCategory(categoryRaw: string | undefined): boolean {
+    const c = (categoryRaw ?? "").toUpperCase();
+    if (!c) return false;
+    if (
+      c.includes("IFCBEAM") ||
+      c.includes("IFCCOLUMN") ||
+      c.includes("IFCPLATE") ||
+      c.includes("IFCMEMBER") ||
+      c.includes("IFCWALL") ||
+      c.includes("IFCSLAB") ||
+      c.includes("IFCCOVERING")
+    ) {
+      return false;
+    }
+    if (
+      c.includes("MECHANICALFASTENER") ||
+      c.includes("IFCFASTENER") ||
+      (c.includes("FASTENER") && !c.includes("GRID"))
+    ) {
+      return true;
+    }
+    if (c.includes("DISCRETEACCESSORY")) return true;
+    if (
+      c.includes("OPENINGELEMENT") ||
+      c.includes("OPENINGSTANDARD") ||
+      c.includes("FEATUREELEMENTSUBTRACTION")
+    ) {
+      return true;
+    }
+    if (c.includes("VOIDINGFEATURE")) return true;
+    return false;
+  }
+
+  /**
+   * Isolation‑only: `IfcRelConnectsElements` (inverse `ConnectedTo` / `ConnectedFrom`) exposes bolts and
+   * Tekla‑style hole solids adjacent to isolated parts without pulling in the whole connected neighbour.
+   * Not applied in {@link applyViewVisibilityFilter} — hiding one side of a joint should not erase shared hardware.
+   */
+  private async mergeBoltHoleConnectionLocals(
+    fragModel: FragmentsModel,
+    locals: Set<number>,
+    validLocals: ReadonlySet<number>,
+    boltGuidIsolationAllowlist?: ReadonlySet<string>,
+  ): Promise<void> {
+    if (locals.size === 0) return;
+    const relConfig = {
+      attributesDefault: true,
+      relationsDefault: { attributes: false, relations: false },
+      relations: {
+        ConnectedTo: { attributes: true, relations: true },
+        ConnectedFrom: { attributes: true, relations: true },
+      },
+    };
+    const CHUNK = 64;
+    const ITEM_CHUNK = 200;
+    const candidates = new Set<number>();
+    const seeds = [...locals];
+    for (let i = 0; i < seeds.length; i += CHUNK) {
+      const slice = seeds.slice(i, i + CHUNK);
+      try {
+        const dataRows = await fragModel.getItemsData(slice, relConfig);
+        const foundLocals = new Set<number>();
+        const foundGuids = new Set<string>();
+        const roots = Array.isArray(dataRows) ? dataRows : [];
+        this.collectIdsAndGuidsFromItemDataRoot(roots, foundLocals, foundGuids, 6000);
+        for (const lid of foundLocals) {
+          if (validLocals.has(lid)) candidates.add(lid);
+        }
+        if (foundGuids.size === 0) continue;
+        const gArr = [...foundGuids];
+        for (let j = 0; j < gArr.length; j += CHUNK) {
+          const gSlice = gArr.slice(j, j + CHUNK);
+          try {
+            const lidArr = await fragModel.getLocalIdsByGuids(gSlice);
+            for (let k = 0; k < lidArr.length; k++) {
+              const loc = lidArr[k];
+              if (typeof loc === "number" && Number.isFinite(loc) && validLocals.has(loc)) {
+                candidates.add(loc);
+              }
+            }
+          } catch {
+            /* ignore guid chunk */
+          }
+        }
+      } catch {
+        /* ignore fragment chunk */
+      }
+    }
+
+    const toInspect = [...candidates].filter((id) => !locals.has(id));
+    for (let i = 0; i < toInspect.length; i += ITEM_CHUNK) {
+      const slice = toInspect.slice(i, i + ITEM_CHUNK);
+      try {
+        const rows = await fragModel.getItems(slice);
+        const constrainBolts = boltGuidIsolationAllowlist !== undefined;
+        for (const [lid, raw] of rows) {
+          if (!validLocals.has(lid)) continue;
+          if (!this.isBoltHoleConnectionCompanionCategory(raw.category)) continue;
+          if (constrainBolts && !this.isDiscreteAccessoryCategory(raw.category)) {
+            const g = normalizeIfcGuidKey(
+              typeof raw.guid === "string" ? raw.guid : null,
+            );
+            if (!g || !boltGuidIsolationAllowlist!.has(g)) continue;
+          }
+          locals.add(lid);
+        }
+      } catch {
+        /* ignore inspection chunk */
+      }
+    }
+  }
+
+  /**
+   * When IFC omits connection relations from leaf plates/beams (common with nested assemblies),
+   * keep fasteners whose AABB overlaps the padded union of isolated seed parts — joint-adjacent only.
+   * Isolation-only (not סינון תצוגה) to avoid phantom hardware when hiding an element.
+   */
+  private async mergeFastenersNearIsolationSeeds(
+    fragModel: FragmentsModel,
+    locals: Set<number>,
+    seedSteelLocals: readonly number[],
+    validLocals: ReadonlySet<number>,
+    spatialBoltIsolationAllowlist?: ReadonlySet<string>,
+  ): Promise<void> {
+    const seeds = seedSteelLocals.filter((id) => validLocals.has(id));
+    if (seeds.length === 0) return;
+    /** `undefined` → run bbox merge without GUID filter (analyzer vs fragment GlobalId often diverge). */
+    if (spatialBoltIsolationAllowlist !== undefined && spatialBoltIsolationAllowlist.size === 0) {
+      return;
+    }
+
+    let probe: THREE.Box3;
+    try {
+      probe = await fragModel.getMergedBox(seeds);
+    } catch {
+      return;
+    }
+    const diagonal = probe.getSize(new THREE.Vector3()).length();
+    if (!Number.isFinite(diagonal) || diagonal <= Number.EPSILON) return;
+
+    /** Moderate envelope: centroid checks were rejecting valid fasteners with offset AABB. */
+    const padLow = diagonal * 0.02;
+    const padHigh = diagonal * 0.2;
+    const padMid = diagonal * 0.09;
+    const pad = THREE.MathUtils.clamp(padMid, padLow, padHigh);
+    probe.expandByScalar(pad);
+
+    let fastenerLocals: number[] = [];
+    try {
+      fastenerLocals = await fragModel.getItemsByQuery({
+        categories: FASTENER_ITEMS_BY_QUERY_REGEX,
+      });
+    } catch {
+      return;
+    }
+    if (!Array.isArray(fastenerLocals) || fastenerLocals.length === 0) return;
+
+    const QUERY_CHUNK = 320;
+    for (let off = 0; off < fastenerLocals.length; off += QUERY_CHUNK) {
+      const chunk = fastenerLocals
+        .slice(off, off + QUERY_CHUNK)
+        .filter((id) => validLocals.has(id) && !locals.has(id));
+      if (chunk.length === 0) continue;
+      let boxes: THREE.Box3[];
+      try {
+        boxes = await fragModel.getBoxes(chunk);
+      } catch {
+        continue;
+      }
+      const survivors: number[] = [];
+      for (let i = 0; i < chunk.length; i++) {
+        const b = boxes[i];
+        if (b && probe.intersectsBox(b)) survivors.push(chunk[i]);
+      }
+      if (survivors.length === 0) continue;
+      try {
+        const rows = await fragModel.getItems(survivors);
+        const guidConstrained =
+          spatialBoltIsolationAllowlist !== undefined &&
+          spatialBoltIsolationAllowlist.size > 0;
+        for (const lid of survivors) {
+          if (guidConstrained) {
+            const raw = rows.get(lid);
+            const g = normalizeIfcGuidKey(
+              typeof raw?.guid === "string" ? raw.guid : null,
+            );
+            if (!g || !spatialBoltIsolationAllowlist!.has(g)) continue;
+          }
+          locals.add(lid);
+        }
+      } catch {
+        /* chunk */
+      }
+    }
+  }
+
   /** Full model id list from worker — avoids `getItemsByVisibility` after `resetVisible` (stale until tiles sync). */
   private async allFragmentLocalIds(fragModel: FragmentsModel): Promise<number[]> {
     const raw = await fragModel.getLocalIds();
@@ -1750,15 +2025,16 @@ export class ViewerEngine {
 
   /**
    * Full isolation: hide all non-selected items (worker visibility). Selection keeps IFC materials
-   * (no blue highlight). Default tile sketch edges are off (avoids leaking hidden geometry); picked
-   * locals get a dedicated edge overlay. Context: ghost snapshot faces + same overlay on picked.
-   * Hidden (הסתר): picked items worker-invisible; remainder uses a per-element edge overlay (LOD tile wires
-   * cannot hide only some instances in a batch without full-opacity leaks).
+   * (no blue highlight). Openings (`HasOpenings`) plus bolt / hole solids linked via
+   * `ConnectedTo` / `ConnectedFrom` are merged into the selection. Default tile sketch edges are off (avoids leaking
+   * hidden geometry); picked locals get a dedicated edge overlay. Context: ghost snapshot faces + same
+   * overlay on picked. Hidden (הסתר): picked items worker-invisible; remainder uses a per-element edge
+   * overlay (LOD tile wires cannot hide only some instances in a batch without full-opacity leaks).
    */
   applyIsolation(
     mode: "isolated" | "context" | "hidden",
     localIds: Set<number>,
-    options?: { focus?: boolean },
+    options?: ApplyIsolationOptions,
   ): Promise<boolean> {
     return this.enqueueIsolation(() => this.applyIsolationImpl(mode, localIds, options));
   }
@@ -1766,7 +2042,7 @@ export class ViewerEngine {
   private async applyIsolationImpl(
     mode: "isolated" | "context" | "hidden",
     localIds: Set<number>,
-    options?: { focus?: boolean },
+    options?: ApplyIsolationOptions,
   ): Promise<boolean> {
     if (this.disposed || !this.modelId || localIds.size === 0) {
       return false;
@@ -1814,6 +2090,23 @@ export class ViewerEngine {
       return false;
     }
 
+    const isolationSeedLocals = [...selected];
+    const coreEdgeOverlayLocals = [...selected];
+    const boltAllow = options?.boltGuidIsolationAllowlist;
+    const spatialBoltAllow = options?.spatialBoltIsolationAllowlist;
+    await this.mergeHostedOpeningLocalIds(fragModel, selected, allIdSet);
+    /** Two hops: fasteners → washers / nested accessories rarely appear as one IFC step from the plate. */
+    await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, boltAllow);
+    await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, boltAllow);
+    await this.mergeFastenersNearIsolationSeeds(
+      fragModel,
+      selected,
+      isolationSeedLocals,
+      allIdSet,
+      spatialBoltAllow,
+    );
+    await this.mergeBoltHoleConnectionLocals(fragModel, selected, allIdSet, boltAllow);
+
     if (mode === "hidden") {
       this.isolationHiddenExcludedLocals = new Set(selected);
     }
@@ -1841,7 +2134,7 @@ export class ViewerEngine {
         this.pickedEdgeOverlay = await buildPickedEdgeOverlay(
           fragModel,
           this.modelObject,
-          Array.from(selected),
+          coreEdgeOverlayLocals,
           this.sketchEdgeMaterialPool,
         );
         this.modelObject.add(this.pickedEdgeOverlay);
@@ -1900,7 +2193,7 @@ export class ViewerEngine {
       this.pickedEdgeOverlay = await buildPickedEdgeOverlay(
         fragModel,
         this.modelObject,
-        Array.from(selected),
+        coreEdgeOverlayLocals,
         this.sketchEdgeMaterialPool,
       );
       this.modelObject.add(this.pickedEdgeOverlay);
@@ -1955,7 +2248,15 @@ export class ViewerEngine {
       await fragModel.resetVisible();
       await this.syncFragmentsViewForced(fragments);
 
-      const ids = [...hiddenLocalIds];
+      const allIds = await this.allFragmentLocalIds(fragModel);
+      const allIdSet = new Set(allIds);
+      const mergedHidden = new Set<number>();
+      for (const id of hiddenLocalIds) {
+        if (allIdSet.has(id)) mergedHidden.add(id);
+      }
+      await this.mergeHostedOpeningLocalIds(fragModel, mergedHidden, allIdSet);
+
+      const ids = [...mergedHidden];
       if (ids.length > 0) {
         await this.chunkInvokeIds(ids, (slice) => fragModel.setVisible(slice, false));
       }
@@ -1966,15 +2267,14 @@ export class ViewerEngine {
         return;
       }
 
-      if (hiddenLocalIds.size === 0) {
+      if (mergedHidden.size === 0) {
         this.syncSketchEdgeVisibilityToIsolationState();
         return;
       }
 
       setSketchEdgeVisibility(this.modelObject, false);
 
-      const allIds = await this.allFragmentLocalIds(fragModel);
-      const hiddenSet = new Set(hiddenLocalIds);
+      const hiddenSet = mergedHidden;
       const visibleIds = allIds.filter((id) => !hiddenSet.has(id));
 
       if (visibleIds.length === 0) {

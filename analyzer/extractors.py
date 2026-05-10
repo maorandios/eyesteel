@@ -1007,6 +1007,179 @@ def is_fastener_entity(part: Any) -> bool:
     return False
 
 
+def _leaf_fastener_products(el: Any) -> list[Any]:
+    """Bolt group (`IfcElementAssembly`) or single fastener IFC products."""
+    if el is None:
+        return []
+    try:
+        if el.is_a("IfcElementAssembly"):
+            bolts = []
+            for leaf in iter_assembly_leaf_products(el):
+                if is_fastener_entity(leaf):
+                    bolts.append(leaf)
+            return bolts
+    except Exception:
+        pass
+    if is_fastener_entity(el):
+        return [el]
+    return []
+
+
+def _leaf_steel_products(el: Any) -> list[Any]:
+    """Physical steel parts nested under assemblies; skips fasteners under the assembly."""
+    if el is None:
+        return []
+    try:
+        if el.is_a("IfcElementAssembly"):
+            rows = []
+            for leaf in iter_assembly_leaf_products(el):
+                if is_fastener_entity(leaf):
+                    continue
+                rows.append(leaf)
+            return rows
+    except Exception:
+        pass
+    if is_fastener_entity(el):
+        return []
+    return [el]
+
+
+def emit_fastener_to_steel_connect(
+    el_a: Any,
+    el_b: Any,
+    seen: set[tuple[str, str]],
+    out: list[dict[str, str]],
+) -> None:
+    """All fastener locals under composite A × steel locals under composite B and vice‑versa."""
+
+    def emit_pair(bolt_el: Any, steel_el: Any) -> None:
+        bid = getattr(bolt_el, "GlobalId", None)
+        sid = getattr(steel_el, "GlobalId", None)
+        if not isinstance(bid, str) or not isinstance(sid, str):
+            return
+        bid, sid = bid.strip(), sid.strip()
+        if len(bid) < 12 or len(sid) < 12:
+            return
+        tup = (bid, sid)
+        if tup in seen:
+            return
+        seen.add(tup)
+        out.append({"boltGlobalId": bid, "partGlobalId": sid})
+
+    if el_a is None or el_b is None:
+        return
+    fast_a, fast_b = _leaf_fastener_products(el_a), _leaf_fastener_products(el_b)
+    steel_a, steel_b = _leaf_steel_products(el_a), _leaf_steel_products(el_b)
+    for b in fast_a:
+        for s in steel_b:
+            emit_pair(b, s)
+    for b in fast_b:
+        for s in steel_a:
+            emit_pair(b, s)
+
+
+def emit_fastener_to_steel_via_element_inverses(
+    bolt_el: Any,
+    seen: set[tuple[str, str]],
+    out: list[dict[str, str]],
+) -> None:
+    """
+    IFC indexes every IfcRelConnectsElements / Path on the fastener via ConnectedTo / ConnectedFrom.
+
+    A global scan of all relations can miss rows depending on wrapper order; walking inverses from
+    each fastener often yields a second (bolt, steel) pair for the other leg of the same joint.
+    """
+    if bolt_el is None:
+        return
+    try:
+        connected_to = getattr(bolt_el, "ConnectedTo", []) or []
+        connected_from = getattr(bolt_el, "ConnectedFrom", []) or []
+    except Exception:
+        return
+    try:
+        for rel in connected_to:
+            try:
+                other = getattr(rel, "RelatingElement", None)
+            except Exception:
+                other = None
+            emit_fastener_to_steel_connect(bolt_el, other, seen, out)
+        for rel in connected_from:
+            try:
+                other = getattr(rel, "RelatedElement", None)
+            except Exception:
+                other = None
+            emit_fastener_to_steel_connect(bolt_el, other, seen, out)
+    except Exception:
+        return
+
+
+def extract_fastener_steel_links(model: Any) -> list[dict[str, str]]:
+    """
+    IFC `IfcRelConnects*` between fastener side and steel side.
+
+    Expands `IfcElementAssembly` ends to **leaf** beams/plates/bolts so joints that reference a
+    cast unit / sub-assembly still match `AnalyzerPart.id` for each physical member.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[dict[str, str]] = []
+
+    for rel in model.by_type("IfcRelConnectsElements"):
+        try:
+            ra = getattr(rel, "RelatingElement", None)
+            rb = getattr(rel, "RelatedElement", None)
+        except Exception:
+            continue
+        emit_fastener_to_steel_connect(ra, rb, seen, out)
+
+    for rel in model.by_type("IfcRelConnectsPathElements"):
+        try:
+            ra = getattr(rel, "RelatingElement", None)
+            rb = getattr(rel, "RelatedElement", None)
+        except Exception:
+            continue
+        emit_fastener_to_steel_connect(ra, rb, seen, out)
+
+    for rel in model.by_type("IfcRelConnectsStructuralElement"):
+        try:
+            ra = getattr(rel, "RelatingElement", None)
+            rb = getattr(rel, "RelatedStructuralMember", None)
+        except Exception:
+            continue
+        emit_fastener_to_steel_connect(ra, rb, seen, out)
+
+    for rel in model.by_type("IfcRelConnectsWithRealizingElements"):
+        elems: list[Any] = []
+        for attr in ("RelatingElement", "RelatedElement"):
+            try:
+                v = getattr(rel, attr, None)
+            except Exception:
+                v = None
+            if v is not None:
+                elems.append(v)
+        try:
+            realizing = getattr(rel, "RealizingElements", ()) or ()
+            riter = realizing if isinstance(realizing, (list, tuple)) else [realizing]
+            for prod in riter:
+                if prod is not None:
+                    elems.append(prod)
+        except Exception:
+            pass
+        # Multi‑way joint (two beams + bolt): link every unordered role that pairs fastener with steel.
+        for i in range(len(elems)):
+            for j in range(len(elems)):
+                if i != j:
+                    emit_fastener_to_steel_connect(elems[i], elems[j], seen, out)
+
+    for tname in ("IfcMechanicalFastener", "IfcFastener"):
+        try:
+            for bolt_el in model.by_type(tname):
+                emit_fastener_to_steel_via_element_inverses(bolt_el, seen, out)
+        except Exception:
+            continue
+
+    return out
+
+
 def should_exclude_hole_like_fastener(part: Any, bolt_row: dict[str, Any]) -> bool:
     """
     Tekla often exports visible hole solids as IfcMechanicalFastener + Tekla Bolt.

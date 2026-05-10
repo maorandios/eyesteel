@@ -9,6 +9,7 @@ from .debug import debug_entity
 from .extractors import (
     extract_assembly_data,
     extract_fastener_data,
+    extract_fastener_steel_links,
     extract_part_data,
     get_entity_psets,
     is_connection_bolt_row,
@@ -122,7 +123,10 @@ def extract_model_data(ifc_file: str, debug: bool = False) -> dict[str, list[dic
             file=sys.stderr,
         )
 
+    bolt_steel_links = extract_fastener_steel_links(model)
+
     return {
         "assemblies": assemblies_out,
         "parts": list(parts_index.values()),
+        "boltSteelLinks": bolt_steel_links,
     }

@@ -49,6 +49,8 @@ import { formatCount, formatKgPlain, formatQuantityInt } from "@/lib/format-numb
 import {
   analyzerEntityMatchesPick,
   analyzerRefsFromAssembly,
+  resolvePartIsolationBoltPolicy,
+  resolveProfileIsolationBoltPolicy,
 } from "@/lib/viewer/ifc-guid";
 import {
   compositeViewerSnapshotPngBlob,
@@ -379,18 +381,36 @@ export default function ViewerPage() {
     [analyzerData, selectedPartId],
   );
 
-  const isolationRefs = useMemo((): { id: string; expressId: number | null }[] => {
+  /** Part / profile isolation: refs + GUID sets (links with assembly fallback; spatial pass links-only when present). */
+  const partIsolationBoltPolicy = useMemo(() => {
+    if (selectedAssembly) return null;
+    const assemblies = analyzerData?.assemblies ?? [];
+    const boltLinks = analyzerData?.boltSteelLinks;
     if (profileGroupDetail?.instances?.length) {
-      return profileGroupDetail.instances.map((p) => ({ id: p.id, expressId: p.expressId }));
+      return resolveProfileIsolationBoltPolicy(
+        profileGroupDetail.instances,
+        assemblies,
+        boltLinks,
+      );
     }
+    if (selectedPart) {
+      return resolvePartIsolationBoltPolicy(selectedPart, assemblies, boltLinks);
+    }
+    return null;
+  }, [
+    analyzerData?.assemblies,
+    analyzerData?.boltSteelLinks,
+    profileGroupDetail,
+    selectedAssembly,
+    selectedPart,
+  ]);
+
+  const isolationRefs = useMemo((): { id: string; expressId: number | null }[] => {
     if (selectedAssembly) {
       return analyzerRefsFromAssembly(selectedAssembly);
     }
-    if (selectedPart) {
-      return [{ id: selectedPart.id, expressId: selectedPart.expressId }];
-    }
-    return [];
-  }, [profileGroupDetail, selectedAssembly, selectedPart]);
+    return partIsolationBoltPolicy?.refs ?? [];
+  }, [partIsolationBoltPolicy, selectedAssembly]);
 
   /** Re-run סינון תצוגה worker state after anything that calls `resetVisible` (e.g. `clearIsolationVisuals`). */
   const reapplyViewFilterIfNeeded = useCallback(async (eng: ViewerEngine) => {
@@ -434,15 +454,21 @@ export default function ViewerPage() {
     [reapplyViewFilterIfNeeded],
   );
 
+  /**
+   * No analyzer GUID allowlists: fragment GlobalIds often disagree with JSON, so strict sets dropped
+   * all hardware. Isolation uses IFC graph + padded bbox in the viewer engine instead.
+   */
+  const isolationApplyOpts = useMemo(() => ({ focus: true as const }), []);
+
   const handleIsolationIsolate = useCallback(async () => {
     if (!engine) return;
     const ids = await engine.resolveIsolationLocalIds(isolationRefs);
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("isolated", ids, { focus: true });
+    const ok = await engine.applyIsolation("isolated", ids, isolationApplyOpts);
     if (ok) useIsolationStore.getState().setIsolation("isolated", [...ids]);
-  }, [engine, isolationRefs]);
+  }, [engine, isolationApplyOpts, isolationRefs]);
 
   const handleIsolationContext = useCallback(async () => {
     if (!engine) return;
@@ -450,9 +476,9 @@ export default function ViewerPage() {
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("context", ids, { focus: true });
+    const ok = await engine.applyIsolation("context", ids, isolationApplyOpts);
     if (ok) useIsolationStore.getState().setIsolation("context", [...ids]);
-  }, [engine, isolationRefs]);
+  }, [engine, isolationApplyOpts, isolationRefs]);
 
   const handleIsolationHide = useCallback(async () => {
     if (!engine) return;
@@ -460,9 +486,9 @@ export default function ViewerPage() {
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("hidden", ids, { focus: true });
+    const ok = await engine.applyIsolation("hidden", ids, isolationApplyOpts);
     if (ok) useIsolationStore.getState().setIsolation("hidden", [...ids]);
-  }, [engine, isolationRefs]);
+  }, [engine, isolationApplyOpts, isolationRefs]);
 
   const handleIsolationShowAll = useCallback(async () => {
     if (!engine) return;
