@@ -13,6 +13,7 @@ import {
   CLIPPING_LABELS_HE,
   type ClippingDirectionId,
 } from "@/lib/viewer/clipping-presets";
+import { Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type SelectionMode = "part" | "assembly";
@@ -22,6 +23,7 @@ interface Props {
   onSelectionModeChange: (mode: SelectionMode) => void;
   onDashboard: () => void;
   onViewFilter?: () => void;
+  onGlobalSearch?: () => void;
   measurementActive: boolean;
   onMeasurementToggle: () => void;
   onMeasurementClear: () => void;
@@ -46,6 +48,7 @@ export function ViewerBottomDock({
   onSelectionModeChange,
   onDashboard,
   onViewFilter,
+  onGlobalSearch,
   measurementActive,
   onMeasurementToggle,
   onMeasurementClear,
@@ -113,7 +116,7 @@ export function ViewerBottomDock({
       <div
         className={cn(
           "pointer-events-auto flex items-center gap-1 rounded-2xl border border-zinc-600 bg-zinc-950/95 px-2 py-2 shadow-2xl backdrop-blur-sm transition-[width] duration-200",
-          measurementActive ? "max-w-[min(100vw-1rem,30rem)]" : "max-w-[min(100vw-1rem,28rem)]",
+          measurementActive ? "max-w-[min(100vw-1rem,34rem)]" : "max-w-[min(100vw-1rem,32rem)]",
         )}
         dir="rtl"
       >
@@ -125,6 +128,19 @@ export function ViewerBottomDock({
         >
           דאשבורד
         </Button>
+
+        {onGlobalSearch && (
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-10 shrink-0 gap-1.5 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm"
+            title="חיפוש במודל"
+            onClick={onGlobalSearch}
+          >
+            <Search className="h-4 w-4 shrink-0 opacity-90" aria-hidden />
+            חיפוש
+          </Button>
+        )}
 
         {onViewFilter && (
           <Button

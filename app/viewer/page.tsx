@@ -35,6 +35,7 @@ import {
   displayPartMark,
   type AggregatedProfileTabRow,
 } from "@/components/viewer/SelectionPickDetails";
+import { GlobalSearchOverlay } from "@/components/viewer/GlobalSearchOverlay";
 import { ViewFilterPanel } from "@/components/viewer/ViewFilterPanel";
 import { useViewFilterSync } from "@/hooks/use-view-filter-sync";
 import { useViewFilterStore } from "@/lib/state/view-filter-store";
@@ -71,6 +72,7 @@ export default function ViewerPage() {
     instances: AnalyzerPart[];
   } | null>(null);
   const [selectionStatus, setSelectionStatus] = useState("בחר אלמנט במודל או מהטבלה");
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const {
     file,
     analyzerData,
@@ -658,6 +660,33 @@ export default function ViewerPage() {
     setSelectionStatus("נוקה");
   }, [engine, clearEngineSelectionPreservingViewFilter]);
 
+  const handleGlobalSearchPickAssembly = useCallback(
+    async (a: AnalyzerAssembly) => {
+      setGlobalSearchOpen(false);
+      setModelDataTab("assemblies");
+      await selectAssembly(a);
+    },
+    [selectAssembly],
+  );
+
+  const handleGlobalSearchPickPart = useCallback(
+    async (p: AnalyzerIndexedEntity) => {
+      setGlobalSearchOpen(false);
+      setModelDataTab("parts");
+      await selectPart(p);
+    },
+    [selectPart],
+  );
+
+  const handleGlobalSearchPickProfile = useCallback(
+    async (r: AggregatedProfileTabRow) => {
+      setGlobalSearchOpen(false);
+      setModelDataTab("profiles");
+      await selectProfileGroupRow(r);
+    },
+    [selectProfileGroupRow],
+  );
+
   useEffect(() => {
     if (!engine) return;
     engine.setPickCallback(async (hit) => {
@@ -896,6 +925,9 @@ export default function ViewerPage() {
             ? () => setActiveSheet("filter")
             : undefined
         }
+        onGlobalSearch={
+          loadingState === "ready" && analyzerData ? () => setGlobalSearchOpen(true) : undefined
+        }
         measurementActive={viewerTool === "measurement"}
         onMeasurementToggle={toggleMeasurementTool}
         onMeasurementClear={() => engine?.clearMeasurements()}
@@ -933,6 +965,19 @@ export default function ViewerPage() {
       )}
 
       {viewerTool === "measurement" && <SmartMeasurementCard />}
+
+      {analyzerData && (
+        <GlobalSearchOverlay
+          open={globalSearchOpen}
+          onClose={() => setGlobalSearchOpen(false)}
+          assemblies={analyzerData.assemblies}
+          indexedParts={analyzerData.parts}
+          steelParts={steelPartsAll}
+          onPickAssembly={handleGlobalSearchPickAssembly}
+          onPickPart={handleGlobalSearchPickPart}
+          onPickProfileRow={handleGlobalSearchPickProfile}
+        />
+      )}
 
       {showFilterPanel && (
         <div className="pointer-events-none absolute inset-0 z-30 flex justify-end">
