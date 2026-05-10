@@ -214,11 +214,17 @@ function meshDataToBufferGeometry(mesh: MeshData): THREE.BufferGeometry | null {
  * is the exact same color rule the regular main-view sketch edges use — so the overlay blends
  * with the dimmed background without a "gray fallback".
  */
+export type BuildPickedEdgeOverlayOptions = {
+  /** Yield between worker geometry batches so large “show everyone except hidden” passes stay responsive. */
+  yieldBetweenBatches?: boolean;
+};
+
 export async function buildPickedEdgeOverlay(
   fragModel: FragmentsModel,
   modelRoot: THREE.Object3D,
   pickedLocalIds: readonly number[],
   lineMaterialPool: Map<number, THREE.LineBasicMaterial>,
+  options?: BuildPickedEdgeOverlayOptions,
 ): Promise<THREE.Group> {
   const group = new THREE.Group();
   group.name = PICKED_EDGE_OVERLAY_NAME;
@@ -227,6 +233,7 @@ export async function buildPickedEdgeOverlay(
 
   const colorByLocal = await resolvePickedFaceColors(fragModel, modelRoot, ids);
   const threshold = THREE.MathUtils.degToRad(SKETCH_EDGE_THRESHOLD_DEG);
+  const yieldBetween = options?.yieldBetweenBatches === true;
 
   for (let i = 0; i < ids.length; i += GEOM_BATCH) {
     const slice = ids.slice(i, i + GEOM_BATCH);
@@ -269,9 +276,21 @@ export async function buildPickedEdgeOverlay(
         group.add(lines);
       }
     }
+    if (yieldBetween && i + GEOM_BATCH < ids.length) {
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+    }
   }
 
   return group;
+}
+
+/** Dispose line geometries built for an overlay group that was never attached (abort / stale-generation). */
+export function disposeConstructedEdgeOverlayGroup(group: THREE.Group | null): void {
+  if (!group) return;
+  group.traverse((obj) => {
+    const ls = obj as THREE.LineSegments;
+    if ((ls as THREE.Object3D).type === "LineSegments" && ls.geometry) ls.geometry.dispose();
+  });
 }
 
 /** Remove the overlay group from its parent and dispose its line geometries. Materials are pooled. */

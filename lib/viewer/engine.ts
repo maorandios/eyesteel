@@ -30,6 +30,7 @@ import {
 } from "@/lib/viewer/sketch-mode";
 import {
   buildPickedEdgeOverlay,
+  disposeConstructedEdgeOverlayGroup,
   disposePickedEdgeOverlay,
 } from "@/lib/viewer/picked-edge-overlay";
 import {
@@ -140,6 +141,13 @@ export class ViewerEngine {
    * tile-mates' edges). Cleared by {@link clearContextMainThreadVisuals}.
    */
   private pickedEdgeOverlay: THREE.Group | null = null;
+  /**
+   * הסתר: fragment local ids suppressed by worker visibility. Used to rebuild per-item remainder edge
+   * overlays (LOD tile wires cannot reliably hide subset instances inside a tile at 100% opacity).
+   */
+  private isolationHiddenExcludedLocals: Set<number> | null = null;
+  private hiddenRemainderSketchNonce = 0;
+  private hiddenRemainderSketchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Serializes isolation RPCs + tile sync. Overlapping `applyIsolation` / `clearIsolationVisuals` (e.g. UI +
    * selection effects) yields a visible "blink" then a stale view on the ThatOpen worker/main bridge.
@@ -586,11 +594,97 @@ export class ViewerEngine {
    *   (which would happen with `itemFilter`-based hiding because shell meshes don't carry one).
    * - **`context`**: keep edges visible — they're dimmed to 15% via
    *   {@link setContextIsolationEdgeOpacity} to match the ghost faces.
+   * - **`hidden`** (הסתר): same rails-off strategy as **`isolated`** — LOD tile wires can still bleed
+   *   full-opacity edges for neighboring instances inside a batched tile, so outlines come only from
+   *   {@link buildPickedEdgeOverlay} for **visible** locals (`getItemsGeometry` per element).
    * - **`none`**: all edges visible at full opacity (live `lodColor` per element).
    */
   private syncSketchEdgeVisibilityToIsolationState(): void {
     if (!this.modelObject) return;
-    setSketchEdgeVisibility(this.modelObject, this.isolationVisualMode !== "isolated");
+    if (this.isolationVisualMode === "isolated" || this.isolationVisualMode === "hidden") {
+      setSketchEdgeVisibility(this.modelObject, false);
+      return;
+    }
+    setSketchEdgeVisibility(this.modelObject, true);
+  }
+
+  private clearHiddenRemainderSketchDebounceTimer(): void {
+    if (this.hiddenRemainderSketchDebounceTimer !== null) {
+      clearTimeout(this.hiddenRemainderSketchDebounceTimer);
+      this.hiddenRemainderSketchDebounceTimer = null;
+    }
+  }
+
+  private shutdownHiddenRemainderSketchState(): void {
+    this.clearHiddenRemainderSketchDebounceTimer();
+    this.hiddenRemainderSketchNonce++;
+    this.isolationHiddenExcludedLocals = null;
+  }
+
+  private scheduleHiddenRemainderSketchOverlayAfterTiles(): void {
+    if (this.disposed || this.isolationVisualMode !== "hidden" || !this.isolationHiddenExcludedLocals?.size) {
+      return;
+    }
+    this.clearHiddenRemainderSketchDebounceTimer();
+    this.hiddenRemainderSketchDebounceTimer = setTimeout(() => {
+      this.hiddenRemainderSketchDebounceTimer = null;
+      if (this.disposed || this.isolationVisualMode !== "hidden") return;
+      void this.enqueueIsolation(async () => {
+        if (this.disposed || this.isolationVisualMode !== "hidden") return;
+        this.hiddenRemainderSketchNonce++;
+        const nonce = this.hiddenRemainderSketchNonce;
+        await this.executeHiddenRemainderSketchOverlayRebuild(nonce);
+      });
+    }, 260);
+  }
+
+  private async executeHiddenRemainderSketchOverlayRebuild(expectedNonce: number): Promise<void> {
+    if (this.disposed || !this.modelObject || !this.modelId) return;
+    if (this.isolationVisualMode !== "hidden") return;
+
+    const excluded = this.isolationHiddenExcludedLocals;
+    if (!excluded) return;
+
+    const fragments = this.components.get(OBC.FragmentsManager);
+    if (!fragments.initialized) return;
+    const fragModel = fragments.list.get(this.modelId);
+    if (!fragModel) return;
+
+    disposePickedEdgeOverlay(this.pickedEdgeOverlay);
+    this.pickedEdgeOverlay = null;
+
+    let allIds: number[];
+    try {
+      allIds = await this.allFragmentLocalIds(fragModel);
+    } catch {
+      return;
+    }
+
+    const visibleLocals = allIds.filter((id) => !excluded.has(id));
+    let overlay = await buildPickedEdgeOverlay(
+      fragModel,
+      this.modelObject,
+      visibleLocals,
+      this.sketchEdgeMaterialPool,
+      { yieldBetweenBatches: true },
+    );
+
+    if (
+      expectedNonce !== this.hiddenRemainderSketchNonce ||
+      this.isolationVisualMode !== "hidden"
+    ) {
+      disposeConstructedEdgeOverlayGroup(overlay);
+      return;
+    }
+
+    if (overlay.children.length === 0) {
+      disposeConstructedEdgeOverlayGroup(overlay);
+      return;
+    }
+
+    this.pickedEdgeOverlay = overlay;
+    this.modelObject.add(overlay);
+    await this.syncFragmentsViewForced(fragments);
   }
 
   /**
@@ -636,7 +730,7 @@ export class ViewerEngine {
    * Fragment tiles keep mounting after load (`tiles.onItemSet` / `onViewUpdated`). Merge materials,
    * attach missing edge geometry, and keep outlines visible.
    */
-  private syncSketchEdgesForNewTiles(): void {
+  private syncSketchEdgesForNewTiles(opts?: { tileMount?: boolean }): void {
     if (this.disposed || !this.modelObject) return;
 
     let newInBackup = false;
@@ -666,6 +760,9 @@ export class ViewerEngine {
     }
     if (visualsDirty) {
       this.applySketchModeVisuals(this.sketchModeEnabled);
+    }
+    if (opts?.tileMount && this.isolationVisualMode === "hidden") {
+      this.scheduleHiddenRemainderSketchOverlayAfterTiles();
     }
   }
 
@@ -701,7 +798,7 @@ export class ViewerEngine {
     onTileSet = () => {
       if (this.disposed) return;
       queueMicrotask(() => {
-        if (!this.disposed) this.syncSketchEdgesForNewTiles();
+        if (!this.disposed) this.syncSketchEdgesForNewTiles({ tileMount: true });
       });
     };
 
@@ -1635,9 +1732,11 @@ export class ViewerEngine {
    * Full isolation: hide all non-selected items (worker visibility). Selection keeps IFC materials
    * (no blue highlight). Default tile sketch edges are off (avoids leaking hidden geometry); picked
    * locals get a dedicated edge overlay. Context: ghost snapshot faces + same overlay on picked.
+   * Hidden (הסתר): picked items worker-invisible; remainder uses a per-element edge overlay (LOD tile wires
+   * cannot hide only some instances in a batch without full-opacity leaks).
    */
   applyIsolation(
-    mode: "isolated" | "context",
+    mode: "isolated" | "context" | "hidden",
     localIds: Set<number>,
     options?: { focus?: boolean },
   ): Promise<boolean> {
@@ -1645,7 +1744,7 @@ export class ViewerEngine {
   }
 
   private async applyIsolationImpl(
-    mode: "isolated" | "context",
+    mode: "isolated" | "context" | "hidden",
     localIds: Set<number>,
     options?: { focus?: boolean },
   ): Promise<boolean> {
@@ -1660,6 +1759,10 @@ export class ViewerEngine {
     const doFocus = options?.focus !== false;
 
     this.clearContextMainThreadVisuals();
+    this.clearHiddenRemainderSketchDebounceTimer();
+    if (mode !== "hidden") {
+      this.shutdownHiddenRemainderSketchState();
+    }
     const prevIsolationVisual = this.isolationVisualMode;
     await fragments.resetHighlight();
     /**
@@ -1668,7 +1771,11 @@ export class ViewerEngine {
      * top of highlight restore and tends to break repeat **הצג בהקשר** (`setOpacity` stops
      * affecting the GL view even though invokes succeed).
      */
-    const mustResetVisible = mode === "isolated" || prevIsolationVisual === "isolated";
+    const mustResetVisible =
+      mode === "isolated" ||
+      mode === "hidden" ||
+      prevIsolationVisual === "isolated" ||
+      prevIsolationVisual === "hidden";
     if (mustResetVisible) {
       await fragModel.resetVisible();
     }
@@ -1681,7 +1788,14 @@ export class ViewerEngine {
       if (allIdSet.has(id)) selected.add(id);
     }
     if (selected.size === 0) {
+      if (mode === "hidden") {
+        this.shutdownHiddenRemainderSketchState();
+      }
       return false;
+    }
+
+    if (mode === "hidden") {
+      this.isolationHiddenExcludedLocals = new Set(selected);
     }
 
     const map = this.bboxMapFromLocalSet(selected);
@@ -1712,6 +1826,26 @@ export class ViewerEngine {
         );
         this.modelObject.add(this.pickedEdgeOverlay);
       }
+      return true;
+    }
+
+    if (mode === "hidden") {
+      const toHide = [...selected];
+      await this.chunkInvokeIds(toHide, (slice) => fragModel.setVisible(slice, false));
+      this.isolationVisualMode = "hidden";
+      await this.syncFragmentsViewForced(fragments);
+      const stillVisible = allIds.filter((id) => !selected.has(id));
+      const focusSet = new Set(stillVisible);
+      const focusMap = this.bboxMapFromLocalSet(focusSet);
+      if (doFocus && focusSet.size > 0) {
+        await this.focusBboxMap(focusMap);
+        await this.syncFragmentsViewForced(fragments);
+      }
+      await this.deferSyncFragmentsView(fragments);
+      this.syncSketchEdgeVisibilityToIsolationState();
+      this.hiddenRemainderSketchNonce++;
+      const hiddenSketchNonce = this.hiddenRemainderSketchNonce;
+      await this.executeHiddenRemainderSketchOverlayRebuild(hiddenSketchNonce);
       return true;
     }
 
@@ -1759,6 +1893,7 @@ export class ViewerEngine {
     return this.enqueueIsolation(async () => {
       try {
         this.clearContextMainThreadVisuals();
+        this.shutdownHiddenRemainderSketchState();
         this.isolationVisualMode = "none";
         if (this.disposed || !this.modelId) {
           return;
@@ -1917,6 +2052,7 @@ export class ViewerEngine {
 
   dispose() {
     if (this.disposed) return;
+    this.shutdownHiddenRemainderSketchState();
     this.clearContextMainThreadVisuals();
     void this.clearIsolationVisuals();
     this.clearClipping();

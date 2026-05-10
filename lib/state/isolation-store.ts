@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 
-export type IsolationMode = "none" | "isolated" | "context";
+export type IsolationMode = "none" | "isolated" | "context" | "hidden";
 
 type IsolationStore = {
   isolationMode: IsolationMode;

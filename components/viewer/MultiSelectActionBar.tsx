@@ -9,6 +9,7 @@ type Props = {
   disabled?: boolean;
   onIsolate: () => void;
   onContext: () => void;
+  onHide: () => void;
   onClear: () => void;
   onDone: () => void;
 };
@@ -19,6 +20,7 @@ export function MultiSelectActionBar({
   disabled,
   onIsolate,
   onContext,
+  onHide,
   onClear,
   onDone,
 }: Props) {
@@ -51,6 +53,15 @@ export function MultiSelectActionBar({
             onClick={onContext}
           >
             הצג בהקשר
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="min-h-10 px-4 text-sm font-semibold"
+            disabled={disabled || selectedCount === 0}
+            onClick={onHide}
+          >
+            הסתר
           </Button>
           <Button
             type="button"

@@ -378,6 +378,16 @@ export default function ViewerPage() {
     if (ok) useIsolationStore.getState().setIsolation("context", [...ids]);
   }, [engine, isolationRefs]);
 
+  const handleIsolationHide = useCallback(async () => {
+    if (!engine) return;
+    const ids = await engine.resolveIsolationLocalIds(isolationRefs);
+    if (ids.size === 0) {
+      return;
+    }
+    const ok = await engine.applyIsolation("hidden", ids, { focus: true });
+    if (ok) useIsolationStore.getState().setIsolation("hidden", [...ids]);
+  }, [engine, isolationRefs]);
+
   const handleIsolationShowAll = useCallback(async () => {
     if (!engine) return;
     await engine.clearIsolationVisuals();
@@ -418,6 +428,17 @@ export default function ViewerPage() {
     const ok = await engine.applyIsolation("context", new Set(ids), { focus: true });
     if (ok) {
       useIsolationStore.getState().setIsolation("context", ids);
+      useMultiSelectStore.getState().exitMultiSelectSession();
+    }
+  }, [engine]);
+
+  const handleMultiHide = useCallback(async () => {
+    if (!engine) return;
+    const ids = useMultiSelectStore.getState().selectedLocalIds;
+    if (ids.length === 0) return;
+    const ok = await engine.applyIsolation("hidden", new Set(ids), { focus: true });
+    if (ok) {
+      useIsolationStore.getState().setIsolation("hidden", ids);
       useMultiSelectStore.getState().exitMultiSelectSession();
     }
   }, [engine]);
@@ -810,6 +831,7 @@ export default function ViewerPage() {
         disabled={!engine || viewerTool === "measurement"}
         onIsolate={() => void handleIsolationIsolate()}
         onContext={() => void handleIsolationContext()}
+        onHide={() => void handleIsolationHide()}
         onShowAll={() => void handleIsolationShowAll()}
       />
 
@@ -819,6 +841,7 @@ export default function ViewerPage() {
         disabled={!engine || viewerTool === "measurement"}
         onIsolate={() => void handleMultiIsolate()}
         onContext={() => void handleMultiContext()}
+        onHide={() => void handleMultiHide()}
         onClear={() => void handleMultiClear()}
         onDone={() => void handleMultiDone()}
       />

@@ -9,6 +9,7 @@ type Props = {
   disabled?: boolean;
   onIsolate: () => void;
   onContext: () => void;
+  onHide: () => void;
   onShowAll: () => void;
 };
 
@@ -18,6 +19,7 @@ export function IsolationActionBar({
   disabled,
   onIsolate,
   onContext,
+  onHide,
   onShowAll,
 }: Props) {
   if (!visible) return null;
@@ -45,6 +47,15 @@ export function IsolationActionBar({
           onClick={onContext}
         >
           הצג בהקשר
+        </Button>
+        <Button
+          type="button"
+          variant={isolationMode === "hidden" ? "default" : "secondary"}
+          className="min-h-10 px-4 text-sm font-semibold"
+          disabled={disabled}
+          onClick={onHide}
+        >
+          הסתר
         </Button>
         <Button
           type="button"
