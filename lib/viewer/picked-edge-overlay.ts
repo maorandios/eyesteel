@@ -8,7 +8,7 @@ import {
 
 /**
  * Top-level overlay group attached under `model.object`, holding `LineSegments` for the picked
- * element(s) at full opacity. The main-view sketch edges stay dimmed to 15% while this overlay
+ * element(s) at full opacity. Context mode keeps main-view sketch edges at ghost opacity while this overlay
  * draws on top, giving the user crisp picked outlines without affecting other items in the same
  * worker tile.
  */

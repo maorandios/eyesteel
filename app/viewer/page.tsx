@@ -19,8 +19,13 @@ import { useViewerToolStore } from "@/lib/state/viewer-tool-store";
 import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import { useViewerViewStore } from "@/lib/state/viewer-view-store";
 import { useIsolationStore } from "@/lib/state/isolation-store";
+import {
+  type InspectionRevertBundle,
+  useInspectionStore,
+} from "@/lib/state/inspection-store";
 import { useMultiSelectStore } from "@/lib/state/multi-select-store";
 import { ViewerEngine, type ApplyIsolationOptions } from "@/lib/viewer/engine";
+import { findAssemblyLabelForPart } from "@/lib/viewer/inspection-assembly";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
 import { he } from "@/lib/i18n/he";
@@ -40,6 +45,9 @@ import {
   type DrawingMarkupLayerHandle,
 } from "@/components/viewer/DrawingMarkupLayer";
 import { ViewerSnapshotToasts } from "@/components/viewer/ViewerSnapshotToasts";
+import { InspectionModeToolbar } from "@/components/viewer/InspectionModeToolbar";
+import { InspectionPanel } from "@/components/viewer/InspectionPanel";
+import { PartInspectionCallout } from "@/components/viewer/PartInspectionCallout";
 import { GlobalSearchOverlay } from "@/components/viewer/GlobalSearchOverlay";
 import { ViewFilterPanel } from "@/components/viewer/ViewFilterPanel";
 import { useViewFilterSync } from "@/hooks/use-view-filter-sync";
@@ -116,6 +124,9 @@ export default function ViewerPage() {
   const clearViewModeStore = useViewerViewStore((s) => s.clearView);
 
   const isolationMode = useIsolationStore((s) => s.isolationMode);
+  const inspectionActive = useInspectionStore((s) => s.active);
+  const inspectionPartId = useInspectionStore((s) => s.selectedPartId);
+  const inspectionViewMode = useInspectionStore((s) => s.inspectionViewMode);
   const pickInteractionMode = useMultiSelectStore((s) => s.pickInteractionMode);
   const multiSelectedCount = useMultiSelectStore((s) => s.selectedLocalIds.length);
 
@@ -168,6 +179,7 @@ export default function ViewerPage() {
     if (!engine || !file) return;
     clearViewModeStore();
     useAppStore.setState({ sketchModeEnabled: false });
+    useInspectionStore.getState().exit();
     setLoadingState("parsing");
     engine
       .loadFile(file)
@@ -386,6 +398,17 @@ export default function ViewerPage() {
     [analyzerData, selectedPartId],
   );
 
+  const inspectionPartResolved = useMemo((): AnalyzerPart | null => {
+    if (!inspectionPartId || !analyzerData) return null;
+    const p = analyzerData.parts.find((x) => x.id === inspectionPartId);
+    return p && !isAnalyzerBoltRow(p) ? (p as AnalyzerPart) : null;
+  }, [inspectionPartId, analyzerData]);
+
+  const inspectionAssemblyLabel = useMemo(() => {
+    if (!inspectionPartId || !analyzerData) return null;
+    return findAssemblyLabelForPart(inspectionPartId, analyzerData.assemblies ?? []);
+  }, [inspectionPartId, analyzerData]);
+
   /** Part / profile isolation: refs + GUID sets (links with assembly fallback; spatial pass links-only when present). */
   const partIsolationBoltPolicy = useMemo(() => {
     if (selectedAssembly) return null;
@@ -485,6 +508,129 @@ export default function ViewerPage() {
     }
     return base;
   }, [partIsolationBoltPolicy]);
+
+  const handleEnterPartInspection = useCallback(async () => {
+    if (
+      !engine ||
+      !analyzerData ||
+      loadingState !== "ready" ||
+      !selectedPart ||
+      isAnalyzerBoltRow(selectedPart)
+    ) {
+      return;
+    }
+    if (viewerTool === "measurement") return;
+    if (useIsolationStore.getState().isolationMode !== "none") return;
+    if (useMultiSelectStore.getState().pickInteractionMode === "multi") return;
+
+    const part = selectedPart as AnalyzerPart;
+    const framingRefs = [{ id: part.id, expressId: part.expressId }];
+    const seedArr = await engine.resolveIsolationLocalIds(framingRefs);
+    const seedIds = new Set(seedArr);
+    if (seedIds.size === 0) return;
+
+    const box = await engine.getMergedWorldBoundingBoxForLocalIds(seedIds);
+    if (!box || box.isEmpty()) return;
+
+    const orthoMode = engine.inspectionSuggestedOrthoMode(box);
+
+    const bundle: InspectionRevertBundle = {
+      camera: engine.captureCameraRevertSnapshot(),
+      sketchModeEnabled: useAppStore.getState().sketchModeEnabled,
+      viewModeUi: useViewerViewStore.getState().viewMode,
+      clipping: engine.getClippingUiSnapshot(),
+      isolationModeBefore: useIsolationStore.getState().isolationMode,
+    };
+
+    engine.clearClipping();
+    useClippingStore.getState().setClipSectionOrthoActive(false);
+    useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
+
+    useAppStore.setState({ sketchModeEnabled: true });
+    engine.setSketchModeFromUI(true);
+    engine.setInspectionBackdropAndLights(true);
+
+    const refsForIsolation = isolationRefs.length > 0 ? isolationRefs : framingRefs;
+    const isolateIdsArr = await engine.resolveIsolationLocalIds(refsForIsolation);
+    const isolateIds = new Set(isolateIdsArr);
+    if (isolateIds.size === 0) {
+      engine.setInspectionBackdropAndLights(false);
+      useAppStore.setState({ sketchModeEnabled: bundle.sketchModeEnabled });
+      engine.setSketchModeFromUI(bundle.sketchModeEnabled);
+      return;
+    }
+
+    const ok = await engine.applyIsolation("isolated", isolateIds, {
+      ...isolationApplyOpts,
+      focus: false,
+    });
+    if (!ok) {
+      engine.setInspectionBackdropAndLights(false);
+      useAppStore.setState({ sketchModeEnabled: bundle.sketchModeEnabled });
+      engine.setSketchModeFromUI(bundle.sketchModeEnabled);
+      return;
+    }
+    useIsolationStore.getState().setIsolation("isolated", [...isolateIds]);
+
+    engine.beginInspectionVisualizationSession(box);
+    engine.applyInspectionOrthographicView(orthoMode);
+    setOrthographicView(orthoMode);
+    useInspectionStore.getState().enter(part.id, bundle, orthoMode);
+    setActiveSheet("details");
+  }, [
+    engine,
+    analyzerData,
+    loadingState,
+    selectedPart,
+    viewerTool,
+    isolationRefs,
+    isolationApplyOpts,
+    setOrthographicView,
+    setActiveSheet,
+  ]);
+
+  const handleExitPartInspection = useCallback(async () => {
+    if (!engine) {
+      useInspectionStore.getState().exit();
+      return;
+    }
+    const bundle = useInspectionStore.getState().revert;
+    useInspectionStore.getState().exit();
+    if (!bundle) return;
+
+    engine.setInspectionBackdropAndLights(false);
+    useAppStore.setState({ sketchModeEnabled: bundle.sketchModeEnabled });
+    engine.setSketchModeFromUI(bundle.sketchModeEnabled);
+
+    await engine.clearIsolationVisuals();
+    useIsolationStore.getState().clearIsolation();
+    await reapplyViewFilterIfNeeded(engine);
+
+    engine.restoreCameraRevertSnapshot(bundle.camera);
+    if (bundle.camera.orthoMode !== null) {
+      setOrthographicView(bundle.camera.orthoMode);
+    } else {
+      clearViewModeStore();
+    }
+
+    if (bundle.clipping.active && bundle.clipping.direction) {
+      engine.enableClippingDirection(bundle.clipping.direction);
+      engine.setClippingDepthOffset(bundle.clipping.depthOffset);
+      if (bundle.clipping.flipped) engine.flipClipping();
+    }
+    useClippingStore.getState().syncFromEngine(engine.getClippingUiSnapshot());
+
+    engine.setTransparency(useAppStore.getState().transparencyEnabled);
+  }, [engine, reapplyViewFilterIfNeeded, setOrthographicView, clearViewModeStore]);
+
+  const handleInspectionOrthoView = useCallback(
+    (mode: ViewModeId) => {
+      engine?.applyInspectionOrthographicView(mode);
+      setOrthographicView(mode);
+      useInspectionStore.getState().setInspectionViewMode(mode);
+    },
+    [engine, setOrthographicView],
+  );
 
   const handleIsolationIsolate = useCallback(async () => {
     if (!engine) return;
@@ -771,6 +917,7 @@ export default function ViewerPage() {
          * In "בחירה מרובה" we keep the running set so accidental misses don't wipe it.
          */
         if (useMultiSelectStore.getState().pickInteractionMode === "multi") return;
+        if (useInspectionStore.getState().active) return;
         await clearViewerSelection();
         return;
       }
@@ -1036,7 +1183,7 @@ export default function ViewerPage() {
     );
   }, []);
 
-  const showDataPanel = activeSheet === "details";
+  const showDataPanel = activeSheet === "details" && !inspectionActive;
   const showFilterPanel = activeSheet === "filter";
 
   return (
@@ -1068,7 +1215,7 @@ export default function ViewerPage() {
         {loadingState === "error" ? "שגיאה בטעינת IFC" : ""}
       </div>
 
-      <CompactModeNav mode={mode} onModeChange={setMode} />
+      {!inspectionActive && <CompactModeNav mode={mode} onModeChange={setMode} />}
 
       <div className="pointer-events-auto absolute right-3 top-[4.75rem] z-20 flex max-w-[min(19rem,88vw)] flex-col items-end gap-1 safe-top">
         {analyzerData && (
@@ -1086,6 +1233,7 @@ export default function ViewerPage() {
 
       <IsolationActionBar
         visible={
+          !inspectionActive &&
           pickInteractionMode !== "multi" &&
           (isolationMode !== "none" || isolationRefs.length > 0) &&
           loadingState === "ready"
@@ -1099,7 +1247,12 @@ export default function ViewerPage() {
       />
 
       <MultiSelectActionBar
-        visible={pickInteractionMode === "multi" && loadingState === "ready" && isolationMode === "none"}
+        visible={
+          !inspectionActive &&
+          pickInteractionMode === "multi" &&
+          loadingState === "ready" &&
+          isolationMode === "none"
+        }
         selectedCount={multiSelectedCount}
         disabled={!engine || viewerTool === "measurement"}
         onIsolate={() => void handleMultiIsolate()}
@@ -1109,6 +1262,45 @@ export default function ViewerPage() {
         onDone={() => void handleMultiDone()}
       />
 
+      <PartInspectionCallout
+        visible={
+          loadingState === "ready" &&
+          !inspectionActive &&
+          !!selectedPart &&
+          !isAnalyzerBoltRow(selectedPart) &&
+          !!selectedPartId &&
+          !selectedAssembly &&
+          !profileGroupDetail &&
+          isolationMode === "none" &&
+          pickInteractionMode !== "multi" &&
+          viewerTool !== "measurement"
+        }
+        disabled={!engine}
+        onInspect={() => void handleEnterPartInspection()}
+      />
+
+      {inspectionActive && inspectionPartResolved && analyzerData && (
+        <InspectionPanel
+          part={inspectionPartResolved}
+          allSteelParts={steelPartsAll}
+          assemblyLabel={inspectionAssemblyLabel}
+          onClose={() => void handleExitPartInspection()}
+        />
+      )}
+
+      {inspectionActive && (
+        <InspectionModeToolbar
+          activeViewMode={inspectionViewMode}
+          measurementActive={viewerTool === "measurement"}
+          sketchActive={sketchModeEnabled}
+          onExit={() => void handleExitPartInspection()}
+          onMeasurementToggle={toggleMeasurementTool}
+          onApplyViewMode={handleInspectionOrthoView}
+          onSketchToggle={handleSketchToggle}
+        />
+      )}
+
+      {!inspectionActive && (
       <ViewerBottomDock
         selectionMode={selectionMode}
         onSelectionModeChange={handleDockSelectionMode}
@@ -1159,16 +1351,19 @@ export default function ViewerPage() {
             : undefined
         }
       />
+      )}
 
-      <ClippingActiveBar
-        snapshot={clipSnap}
-        onDepthChange={handleClippingDepth}
-        onFlip={handleClippingFlip}
-        onSectionViewToggle={handleClippingSectionViewToggle}
-        onCancel={handleClippingCancel}
-      />
+      {!inspectionActive && (
+        <ClippingActiveBar
+          snapshot={clipSnap}
+          onDepthChange={handleClippingDepth}
+          onFlip={handleClippingFlip}
+          onSectionViewToggle={handleClippingSectionViewToggle}
+          onCancel={handleClippingCancel}
+        />
+      )}
 
-      {viewMode !== "none" && (
+      {!inspectionActive && viewMode !== "none" && (
         <ViewModeActiveBar
           viewMode={viewMode}
           onExit={handleExitViewMode}

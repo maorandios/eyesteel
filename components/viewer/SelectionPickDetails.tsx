@@ -572,11 +572,16 @@ export function PartPickDetailPanel({
   entity,
   allSteelParts,
   onBackToList,
+  variant = "default",
+  assemblyMark = null,
 }: {
   entity: AnalyzerIndexedEntity;
   /** All non-bolt parts from analyzer output — used for model-wide כמות count */
   allSteelParts?: AnalyzerPart[];
   onBackToList: () => void;
+  variant?: "default" | "inspection";
+  /** Assembly name/mark when known (מצב בדיקה inspector). */
+  assemblyMark?: string | null;
 }) {
   if (isAnalyzerBoltRow(entity)) {
     const b = entity;
@@ -618,6 +623,9 @@ export function PartPickDetailPanel({
     allSteelParts && allSteelParts.length > 0 ? countSteelPartsMatchingIdentity(part, allSteelParts) : null;
 
   const generalRows = [
+    ...(assemblyMark?.trim()
+      ? [{ label: "הרכבה", value: assemblyMark.trim() }]
+      : []),
     { label: "מספר חלק", value: displayPartMark(part) },
     { label: "פרופיל", value: profileEl },
     { label: "שם חלק", value: displayPartIfcName(part) },
@@ -660,24 +668,38 @@ export function PartPickDetailPanel({
           },
         ]
       : []),
+    { label: "סוג IFC", value: part.ifcType || EM_DASH },
   ];
+
+  const isInspection = variant === "inspection";
 
   return (
     <div className="space-y-5" dir="rtl">
+      {isInspection && (
+        <p className="rounded-lg border border-sky-900/70 bg-sky-950/50 px-3 py-2 text-center text-[11px] font-semibold text-sky-200">
+          מצב בדיקה
+        </p>
+      )}
       <div className="flex items-start justify-between gap-2">
         <div>
-          <p className="text-[11px] text-zinc-500">חלק נבחר</p>
+          <p className="text-[11px] text-zinc-500">
+            {isInspection ? "חלק בבדיקה" : "חלק נבחר"}
+          </p>
           <p className="text-sm font-semibold text-zinc-100">{title}</p>
         </div>
-        <Button variant="secondary" className="h-8 shrink-0 px-3 text-xs" onClick={onBackToList}>
-          חזרה לרשימה
-        </Button>
+        {!isInspection && (
+          <Button variant="secondary" className="h-8 shrink-0 px-3 text-xs" onClick={onBackToList}>
+            חזרה לרשימה
+          </Button>
+        )}
       </div>
 
       <KeyValueList title="נתונים כלליים" rows={generalRows} />
-      <p className="mt-2 text-[11px] leading-snug text-zinc-500">
-        כמות = מספר פריטים זהים במודל כולו (מספר חלק, פרופיל, שם חלק ומשקל)
-      </p>
+      {!isInspection && (
+        <p className="mt-2 text-[11px] leading-snug text-zinc-500">
+          כמות = מספר פריטים זהים במודל כולו (מספר חלק, פרופיל, שם חלק ומשקל)
+        </p>
+      )}
 
       <KeyValueList title="נתונים טכניים" rows={technicalRows} />
     </div>

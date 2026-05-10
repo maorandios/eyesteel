@@ -39,6 +39,7 @@ import {
   eyePositionFromCenter,
   type ViewModeId,
 } from "@/lib/viewer/view-mode-presets";
+import { pickInspectionViewModeFromBox } from "@/lib/viewer/inspection-view";
 import {
   CLIPPING_LABELS_HE,
   type ClippingDirectionId,
@@ -51,6 +52,16 @@ export interface PickHit {
   localId: number;
   itemId: number;
 }
+
+/** Saved before מצב בדיקה so camera + orthographic מבט restore exactly after exit. */
+export type ViewerCameraRevertSnapshot = {
+  orthoMode: ViewModeId | null;
+  position: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+  /** {@link THREE.OrthographicCamera.zoom} when {@link orthoMode} is set; unused for perspective. */
+  orthoZoom: number;
+};
 
 export type ApplyIsolationOptions = {
   focus?: boolean;
@@ -86,6 +97,8 @@ const TAP_MAX_MS_MOUSE = 700;
 const TAP_MAX_MS_TOUCH = 950;
 
 const ORTHO_MARGIN = 1.08;
+/** Tighter framing in מצב בדיקה so the part fills the orthographic view. */
+const INSPECTION_ORTHO_MARGIN = 1.042;
 const ORTHO_DISTANCE_K = 1.75;
 
 /** Worker batch size for `setVisible` / `setOpacity` on large Tekla models (mobile-safe). */
@@ -143,6 +156,12 @@ export class ViewerEngine {
   /** Non-null while an orthographic preset is active (resize refit + dispose cleanup). */
   private activeOrthoViewMode: ViewModeId | null = null;
   private orthoResizeHandler: (() => void) | null = null;
+  /** White backdrop + dimmed fill lights during מצב בדיקה (restored on exit / dispose). */
+  private inspectionPresentationActive = false;
+  /** World-space bounds used to refit orthographic presets while inspecting (steel-only framing). */
+  private inspectionSessionFramingBox: THREE.Box3 | null = null;
+  private readonly inspectionSceneBackground = new THREE.Color(0xf7f8fa);
+  private viewerLightIntensityBackup: number[] | null = null;
   private readonly tmpVecEye = new THREE.Vector3();
   private readonly tmpClipNormal = new THREE.Vector3();
 
@@ -308,13 +327,15 @@ export class ViewerEngine {
     const w = el.clientWidth;
     const h = el.clientHeight;
     const aspect = w > 0 && h > 0 ? w / h : 1;
-    this.updateOrthoFrustumForAspect(box, aspect);
+    const marginFactor =
+      this.inspectionSessionFramingBox !== null ? INSPECTION_ORTHO_MARGIN : ORTHO_MARGIN;
+    this.updateOrthoFrustumForAspect(box, aspect, marginFactor);
   }
 
-  private updateOrthoFrustumForAspect(box: THREE.Box3, aspect: number) {
+  private updateOrthoFrustumForAspect(box: THREE.Box3, aspect: number, marginFactor = ORTHO_MARGIN) {
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z, 1);
-    const halfBase = 0.5 * maxDim * ORTHO_MARGIN;
+    const halfBase = 0.5 * maxDim * marginFactor;
     const ortho = this.orthographicCamera;
     const safeAspect = aspect > 0 && Number.isFinite(aspect) ? aspect : 1;
     if (safeAspect >= 1) {
@@ -367,8 +388,13 @@ export class ViewerEngine {
     this.detachOrthoResizeListener();
     const renderer = this.world.renderer as OBF.RendererWith2D;
     this.orthoResizeHandler = () => {
-      if (this.disposed || !this.modelObject || this.activeOrthoViewMode === null) return;
-      const box = new THREE.Box3().setFromObject(this.modelObject);
+      if (this.disposed || this.activeOrthoViewMode === null) return;
+      let box = new THREE.Box3();
+      if (this.inspectionSessionFramingBox) {
+        box.copy(this.inspectionSessionFramingBox);
+      } else if (this.modelObject) {
+        box.setFromObject(this.modelObject);
+      }
       if (!box.isEmpty()) this.updateOrthoFrustum(box);
     };
     renderer.onResize.add(this.orthoResizeHandler);
@@ -473,9 +499,186 @@ export class ViewerEngine {
     return true;
   }
 
+  captureCameraRevertSnapshot(): ViewerCameraRevertSnapshot {
+    const ctrl = this.world.camera.controls;
+    const cam = this.world.camera.three as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+    const pos = ctrl?.getPosition(new THREE.Vector3()) ?? cam.position.clone();
+    const tgt = ctrl?.getTarget(new THREE.Vector3()) ?? new THREE.Vector3();
+    const up = cam.up.clone();
+    const orthoZoom = cam instanceof THREE.OrthographicCamera ? cam.zoom : 1;
+    return {
+      orthoMode: this.activeOrthoViewMode,
+      position: pos.toArray() as [number, number, number],
+      target: tgt.toArray() as [number, number, number],
+      up: up.toArray() as [number, number, number],
+      orthoZoom,
+    };
+  }
+
+  restoreCameraRevertSnapshot(snapshot: ViewerCameraRevertSnapshot): void {
+    if (this.disposed) return;
+    const ctrl = this.world.camera.controls;
+    const simpleCam = this.world.camera as OBC.SimpleCamera;
+    const pos = new THREE.Vector3().fromArray(snapshot.position);
+    const tgt = new THREE.Vector3().fromArray(snapshot.target);
+    const up = new THREE.Vector3().fromArray(snapshot.up);
+
+    if (!ctrl) return;
+
+    if (snapshot.orthoMode !== null) {
+      this.detachOrthoResizeListener();
+      const ortho = this.orthographicCamera;
+      ortho.up.copy(up);
+      simpleCam.three = ortho;
+      ctrl.camera = ortho;
+      this.applyOrthographicPlanNavigationBindings(ctrl);
+      ortho.zoom = snapshot.orthoZoom;
+      void ctrl.zoomTo(ortho.zoom, false);
+      ctrl.updateCameraUp();
+      ctrl.setOrbitPoint(tgt.x, tgt.y, tgt.z);
+      ctrl.setLookAt(pos.x, pos.y, pos.z, tgt.x, tgt.y, tgt.z, false);
+      this.activeOrthoViewMode = snapshot.orthoMode;
+      this.boundUseCamera?.(ortho);
+      this.attachOrthoResizeListener();
+    } else {
+      if (this.activeOrthoViewMode !== null) this.detachOrthoResizeListener();
+      this.activeOrthoViewMode = null;
+      simpleCam.three = this.perspectiveCamera;
+      ctrl.camera = this.perspectiveCamera;
+      this.applyPerspectiveNavigationBindings(ctrl);
+      this.perspectiveCamera.up.copy(up);
+      this.world.scene.three.up.copy(up);
+      ctrl.updateCameraUp();
+      ctrl.setOrbitPoint(tgt.x, tgt.y, tgt.z);
+      ctrl.setLookAt(pos.x, pos.y, pos.z, tgt.x, tgt.y, tgt.z, false);
+      this.boundUseCamera?.(this.perspectiveCamera);
+    }
+    if (this.inspectionSessionFramingBox !== null) {
+      this.clearInspectionVisualizationSession();
+    }
+    void this.syncFragmentsAfterCameraSwap();
+  }
+
+  /**
+   * Union of ThatOpen worker bboxes for fragment locals (world space). Used to frame מצב בדיקה
+   * on steel-only seeds before bolt merge expands isolation.
+   */
+  async getMergedWorldBoundingBoxForLocalIds(
+    localIds: ReadonlySet<number>,
+  ): Promise<THREE.Box3 | null> {
+    if (this.disposed || !this.modelId || localIds.size === 0) return null;
+    const fragments = this.components.get(OBC.FragmentsManager);
+    const map = this.bboxMapFromLocalSet(new Set(localIds));
+    try {
+      const boxes = await fragments.getBBoxes(map);
+      if (!boxes.length) return null;
+      const agg = new THREE.Box3();
+      boxes.forEach((box) => agg.union(box));
+      return agg.isEmpty() ? null : agg;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Store AABB refit bounds for orthographic מבט while inspecting (toolbar view cycling). */
+  beginInspectionVisualizationSession(framingBox: THREE.Box3): void {
+    this.inspectionSessionFramingBox = framingBox.clone();
+  }
+
+  clearInspectionVisualizationSession(): void {
+    this.inspectionSessionFramingBox = null;
+  }
+
+  isInspectionVisualizationSessionActive(): boolean {
+    return this.inspectionSessionFramingBox !== null;
+  }
+
+  /** Light backdrop + subdued scene lights so sketch edges read like a tech drawing. */
+  setInspectionBackdropAndLights(active: boolean): void {
+    if (this.disposed) return;
+    if (active === this.inspectionPresentationActive) return;
+    const scene = this.world.scene.three as THREE.Scene;
+    if (active) {
+      if (!this.viewerLightIntensityBackup) {
+        this.viewerLightIntensityBackup = this.viewerLights.map((L) => L.intensity);
+      }
+      scene.background = this.inspectionSceneBackground.clone() as unknown as THREE.Scene["background"];
+      for (let i = 0; i < this.viewerLights.length; i++) {
+        const L = this.viewerLights[i];
+        const base = this.viewerLightIntensityBackup[i] ?? L.intensity;
+        L.intensity = base * 0.45;
+      }
+      this.inspectionPresentationActive = true;
+    } else {
+      scene.background = this.sceneBackdropDefault.clone() as unknown as THREE.Scene["background"];
+      if (this.viewerLightIntensityBackup) {
+        for (let i = 0; i < this.viewerLights.length; i++) {
+          const L = this.viewerLights[i];
+          const base = this.viewerLightIntensityBackup[i];
+          if (typeof base === "number") L.intensity = base;
+        }
+      }
+      this.viewerLightIntensityBackup = null;
+      this.inspectionPresentationActive = false;
+    }
+  }
+
+  inspectionSuggestedOrthoMode(box: THREE.Box3): ViewModeId {
+    return pickInspectionViewModeFromBox(box);
+  }
+
+  /**
+   * Orthographic framing for מצב בדיקה using the session steel AABB (tight margin + axis preset).
+   * Call after {@link beginInspectionVisualizationSession}.
+   */
+  applyInspectionOrthographicView(mode: ViewModeId): boolean {
+    if (
+      this.disposed ||
+      !this.modelObject ||
+      !this.inspectionSessionFramingBox ||
+      this.inspectionSessionFramingBox.isEmpty()
+    ) {
+      return false;
+    }
+    const box = this.inspectionSessionFramingBox;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const span = Math.max(size.x, size.y, size.z, 1);
+    const distance = ORTHO_DISTANCE_K * span;
+
+    this.updateOrthoFrustum(box);
+
+    const simpleCam = this.world.camera as OBC.SimpleCamera;
+    const ctrl = simpleCam.controls;
+    const ortho = this.orthographicCamera;
+
+    ortho.up.copy(cameraUpForViewMode(mode));
+
+    simpleCam.three = ortho;
+    if (ctrl) {
+      ctrl.camera = ortho;
+      this.applyOrthographicPlanNavigationBindings(ctrl);
+      ortho.zoom = 1;
+      void ctrl.zoomTo(ortho.zoom, false);
+    }
+
+    const eye = eyePositionFromCenter(mode, center, distance, this.tmpVecEye);
+    ctrl?.setOrbitPoint(center.x, center.y, center.z);
+    ctrl?.updateCameraUp();
+    ctrl?.setLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, false);
+
+    this.boundUseCamera?.(ortho);
+    void this.syncFragmentsAfterCameraSwap();
+
+    this.activeOrthoViewMode = mode;
+    this.attachOrthoResizeListener();
+    return true;
+  }
+
   /** Restore perspective camera, fragment projection, and iso frame (same as exiting מבט). */
   exitViewMode(): void {
     if (this.disposed || this.activeOrthoViewMode === null) return;
+    this.clearInspectionVisualizationSession();
     this.detachOrthoResizeListener();
     this.activeOrthoViewMode = null;
 
@@ -636,7 +839,7 @@ export class ViewerEngine {
    * - **`isolated`**: hide every main-view sketch edge. The picked element's outline is drawn by
    *   {@link buildPickedEdgeOverlay} on top, so non-picked tile-mates can never bleed through
    *   (which would happen with `itemFilter`-based hiding because shell meshes don't carry one).
-   * - **`context`**: keep edges visible — they're dimmed to 15% via
+   * - **`context`**: keep edges visible — dimmed to match `CONTEXT_GHOST_FACE_OPACITY` (visual-policy) via
    *   {@link setContextIsolationEdgeOpacity} to match the ghost faces.
    * - **`hidden`** (הסתר): same rails-off strategy as **`isolated`** — LOD tile wires can still bleed
    *   full-opacity edges for neighboring instances inside a batched tile, so outlines come only from
@@ -2398,7 +2601,7 @@ export class ViewerEngine {
     return new THREE.Color(0x8f98a3);
   }
 
-  /** Semi-transparent context overlay: same IFC hue as the source tile, ~15% opacity (see visual-policy). */
+  /** Semi-transparent context overlay: same IFC hue as the source tile (see visual-policy opacity). */
   private makeContextGhostMaterialForMesh(mesh: THREE.Mesh): THREE.MeshBasicMaterial {
     return new THREE.MeshBasicMaterial({
       color: this.extractFragmentDisplayColor(mesh),
@@ -2764,7 +2967,7 @@ export class ViewerEngine {
       await this.focusBboxMap(map);
     }
     /**
-     * Match the 15% ghost face opacity on every sketch edge (LineBasic pool + LOD wire `lodOpacity`)
+     * Match ghost face opacity on every sketch edge (LineBasic pool + LOD wire `lodOpacity`)
      * so the rest of the model reads as a faint sketch. The picked element's crisp 100% outline is
      * drawn on top by {@link buildPickedEdgeOverlay} — per-item geometry from `getItemsGeometry`,
      * so picking one bolt never lights up its tile-mates.
@@ -3038,6 +3241,7 @@ export class ViewerEngine {
 
   dispose() {
     if (this.disposed) return;
+    this.clearInspectionVisualizationSession();
     this.shutdownHiddenRemainderSketchState();
     this.clearContextMainThreadVisuals();
     void this.clearIsolationVisuals();
