@@ -38,6 +38,11 @@ interface Props {
   multiSelectActive?: boolean;
   multiSelectEnterDisabled?: boolean;
   onMultiSelectEnter?: () => void;
+  markupDrawingActive?: boolean;
+  markupDrawingHasInk?: boolean;
+  markupDrawingDisabled?: boolean;
+  onMarkupDrawingToggle?: () => void;
+  onMarkupDrawingClear?: () => void;
 }
 
 /**
@@ -63,6 +68,11 @@ export function ViewerBottomDock({
   multiSelectActive = false,
   multiSelectEnterDisabled = false,
   onMultiSelectEnter,
+  markupDrawingActive = false,
+  markupDrawingHasInk = false,
+  markupDrawingDisabled = false,
+  onMarkupDrawingToggle,
+  onMarkupDrawingClear,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -116,7 +126,9 @@ export function ViewerBottomDock({
       <div
         className={cn(
           "pointer-events-auto flex items-center gap-1 rounded-2xl border border-zinc-600 bg-zinc-950/95 px-2 py-2 shadow-2xl backdrop-blur-sm transition-[width] duration-200",
-          measurementActive ? "max-w-[min(100vw-1rem,34rem)]" : "max-w-[min(100vw-1rem,32rem)]",
+          measurementActive || markupDrawingActive || markupDrawingHasInk
+            ? "max-w-[min(100vw-1rem,36rem)]"
+            : "max-w-[min(100vw-1rem,32rem)]",
         )}
         dir="rtl"
       >
@@ -277,12 +289,39 @@ export function ViewerBottomDock({
             multiSelectActive && "ring-2 ring-sky-400/80 ring-offset-2 ring-offset-zinc-950",
           )}
           aria-pressed={multiSelectActive}
-          disabled={multiSelectEnterDisabled || measurementActive}
-          title={measurementActive ? "צא ממדידה כדי להפעיל בחירה מרובה" : undefined}
+          disabled={multiSelectEnterDisabled || measurementActive || markupDrawingActive}
+          title={
+            measurementActive
+              ? "צא ממדידה כדי להפעיל בחירה מרובה"
+              : markupDrawingActive
+                ? "צא ממצב ציור כדי להפעיל בחירה מרובה"
+                : undefined
+          }
           onClick={() => onMultiSelectEnter?.()}
         >
           בחירה מרובה
         </Button>
+
+        {onMarkupDrawingToggle && (
+          <Button
+            type="button"
+            variant={markupDrawingActive ? "default" : "secondary"}
+            className={cn(
+              "h-10 shrink-0 px-2.5 text-xs font-semibold sm:px-3 sm:text-sm",
+              markupDrawingActive && "ring-2 ring-red-500/80 ring-offset-2 ring-offset-zinc-950",
+            )}
+            aria-pressed={markupDrawingActive}
+            disabled={markupDrawingDisabled}
+            title={
+              markupDrawingDisabled
+                ? "אינו זמין במדידה או לפני טעינת המודל"
+                : "ציור על המסך — אדום"
+            }
+            onClick={onMarkupDrawingToggle}
+          >
+            ציור
+          </Button>
+        )}
 
         <Button
           type="button"
@@ -296,6 +335,17 @@ export function ViewerBottomDock({
         >
           מדידה
         </Button>
+
+        {(markupDrawingActive || markupDrawingHasInk) && onMarkupDrawingClear && (
+          <Button
+            type="button"
+            variant="ghost"
+            className="h-10 shrink-0 px-2 text-xs text-zinc-300"
+            onClick={onMarkupDrawingClear}
+          >
+            נקה
+          </Button>
+        )}
 
         {measurementActive && (
           <>

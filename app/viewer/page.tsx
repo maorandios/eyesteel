@@ -35,6 +35,7 @@ import {
   displayPartMark,
   type AggregatedProfileTabRow,
 } from "@/components/viewer/SelectionPickDetails";
+import { DrawingMarkupLayer } from "@/components/viewer/DrawingMarkupLayer";
 import { GlobalSearchOverlay } from "@/components/viewer/GlobalSearchOverlay";
 import { ViewFilterPanel } from "@/components/viewer/ViewFilterPanel";
 import { useViewFilterSync } from "@/hooks/use-view-filter-sync";
@@ -73,6 +74,9 @@ export default function ViewerPage() {
   } | null>(null);
   const [selectionStatus, setSelectionStatus] = useState("בחר אלמנט במודל או מהטבלה");
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [markupDrawingEnabled, setMarkupDrawingEnabled] = useState(false);
+  const [drawingClearSignal, setDrawingClearSignal] = useState(0);
+  const [hasMarkupInk, setHasMarkupInk] = useState(false);
   const {
     file,
     analyzerData,
@@ -138,6 +142,10 @@ export default function ViewerPage() {
   }, [file, setViewerTool]);
 
   useEffect(() => {
+    if (loadingState !== "ready") setHasMarkupInk(false);
+  }, [loadingState]);
+
+  useEffect(() => {
     if (!file) router.replace("/");
   }, [file, router]);
 
@@ -199,6 +207,7 @@ export default function ViewerPage() {
 
   const toggleMeasurementTool = useCallback(() => {
     if (viewerTool !== "measurement") {
+      setMarkupDrawingEnabled(false);
       if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
         useMultiSelectStore.getState().exitMultiSelectSession();
         void engine?.highlightFragmentLocalSet(new Set());
@@ -453,6 +462,7 @@ export default function ViewerPage() {
 
   const handleEnterMultiSelect = useCallback(() => {
     if (!engine || viewerTool === "measurement" || isolationMode !== "none") return;
+    setMarkupDrawingEnabled(false);
     useMultiSelectStore.getState().clearSelected();
     useMultiSelectStore.getState().enterMultiSelect();
     void engine.highlightFragmentLocalSet(new Set());
@@ -845,6 +855,26 @@ export default function ViewerPage() {
     clearViewerSelection,
   ]);
 
+  const handleMarkupDrawingToggle = useCallback(() => {
+    setMarkupDrawingEnabled((prev) => {
+      const next = !prev;
+      if (next) {
+        if (viewerTool === "measurement") {
+          setViewerTool("none");
+        }
+        if (useAppStore.getState().sketchModeEnabled) {
+          useAppStore.setState({ sketchModeEnabled: false });
+          engine?.setSketchModeFromUI(false);
+        }
+      }
+      return next;
+    });
+  }, [engine, viewerTool, setViewerTool]);
+
+  const handleMarkupDrawingClear = useCallback(() => {
+    setDrawingClearSignal((n) => n + 1);
+  }, []);
+
   const handleDockSelectionMode = useCallback((m: SelectionMode) => {
     setSelectionMode(m);
     if (m === "part") {
@@ -865,6 +895,13 @@ export default function ViewerPage() {
       <div className="absolute inset-0 z-0">
         <ViewerCanvas onReady={onReady} />
       </div>
+      {loadingState === "ready" && (
+        <DrawingMarkupLayer
+          active={markupDrawingEnabled}
+          clearSignal={drawingClearSignal}
+          onInkPresenceChange={setHasMarkupInk}
+        />
+      )}
       <div className="pointer-events-auto absolute left-3 top-3 z-40 safe-top">
         <Button variant="secondary" size="lg" className="shadow-lg" onClick={() => router.push("/")}>
           {he.backToUpload}
@@ -938,14 +975,28 @@ export default function ViewerPage() {
         }
         sketchModeActive={sketchModeEnabled}
         onSketchToggle={handleSketchToggle}
-        sketchDisabled={loadingState !== "ready"}
+        sketchDisabled={loadingState !== "ready" || markupDrawingEnabled}
         clippingDisabled={loadingState !== "ready"}
         onPickClippingDirection={handlePickClippingDirection}
         multiSelectActive={pickInteractionMode === "multi"}
         multiSelectEnterDisabled={
-          loadingState !== "ready" || isolationMode !== "none" || viewerTool === "measurement"
+          loadingState !== "ready" ||
+          isolationMode !== "none" ||
+          viewerTool === "measurement" ||
+          markupDrawingEnabled
         }
         onMultiSelectEnter={handleEnterMultiSelect}
+        markupDrawingActive={markupDrawingEnabled}
+        markupDrawingHasInk={hasMarkupInk}
+        markupDrawingDisabled={loadingState !== "ready" || viewerTool === "measurement"}
+        onMarkupDrawingToggle={
+          loadingState === "ready" ? handleMarkupDrawingToggle : undefined
+        }
+        onMarkupDrawingClear={
+          loadingState === "ready" && (markupDrawingEnabled || hasMarkupInk)
+            ? handleMarkupDrawingClear
+            : undefined
+        }
       />
 
       <ClippingActiveBar
