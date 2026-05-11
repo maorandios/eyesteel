@@ -194,7 +194,6 @@ export class ViewerEngine {
   private readonly tmpClipNormal = new THREE.Vector3();
   /** Cursor-based orbit pivot for pan/dolly/wheel (see {@link installPerspectiveOrbitPivotFromCursor}). */
   private readonly orbitPivotRaycaster = new THREE.Raycaster();
-  private readonly wheelNdcForOrbit = new THREE.Vector2();
   private readonly orbitPivotScratchCenter = new THREE.Vector3();
   private readonly orbitPivotScratchSize = new THREE.Vector3();
   private readonly orbitPivotScratchHit = new THREE.Vector3();
@@ -203,7 +202,6 @@ export class ViewerEngine {
   private readonly orbitFallbackSphere = new THREE.Sphere();
   private readonly orbitFallbackPlane = new THREE.Plane();
   private orbitPivotControlStartHandler: (() => void) | null = null;
-  private orbitPivotWheelHandler: ((e: WheelEvent) => void) | null = null;
 
   /** Single user clipping plane (That Open `renderer.setPlane` + fragments bridge). */
   private readonly userClipPlane = new THREE.Plane();
@@ -343,10 +341,9 @@ export class ViewerEngine {
     const dollyCloseFactor = 0.28 + 0.72 * Math.pow(closeT, 1.1);
     let truck = truckBase * truckGain * truckCloseFactor;
     let dolly = dollyBase * dollyGain * dollyCloseFactor;
-    /**
-     * Without a model pick, pan truck re-projects the target every gesture — feels harsher than
-     * “sticky hit” mode. Ease truck + wheel dolly only for canvas work; selection path unchanged.
-     */
+    if (this.isInspectionVisualizationSessionActive()) {
+      dolly *= 0.82;
+    }
     ctrl.truckSpeed = truck;
     ctrl.dollySpeed = dolly;
   }
@@ -921,11 +918,12 @@ export class ViewerEngine {
     c.smoothTime = 0;
     c.draggingSmoothTime = 0;
     /**
-     * ThatOpen SimpleCamera defaults: `dollyToCursor=true`, `infinityDolly=true`, `minDistance=6`.
-     * With large models, dolly-to-cursor scales target shifts by `radius * tan(fov/2)` — wheel zoom then
-     * barely moves the eye along the view ray (or feels “stuck”) until the target is panned elsewhere.
+     * Wheel zoom uses camera-controls’ built-in cursor-relative dolly (`_dollyControlCoord` +
+     * late-update target lerp). Do **not** also call `setOrbitPoint` on every wheel: each tick would
+     * run `setOrbitPoint` → `dollyTo` + `moveTo` and then `_dollyInternal`, and async `getFullPick`
+     * would re-target late — the point under the cursor drifts.
      */
-    c.dollyToCursor = false;
+    c.dollyToCursor = true;
     c.infinityDolly = false;
     c.minDistance = 0.05;
     /** {@link syncPerspectiveOrbitLimitsClipAndSensitivity} sets a finite cap once the model exists. */
@@ -936,13 +934,12 @@ export class ViewerEngine {
   }
 
   /**
-   * Canvas orbit/pan/zoom uses the same pivot contract as an element tap: {@link applyOrbitPivotFromModelPickLikeTap}
-   * seeds {@link pickOrbitPivotWorld} via {@link OBC.FastModelPickers#getFullPick} (plus sync ray fallback).
+   * Pointer-driven orbit/pan/rotate: {@link applyOrbitPivotFromModelPickLikeTap} seeds {@link pickOrbitPivotWorld}.
+   * Mouse wheel zoom uses {@link CameraControls#dollyToCursor} only (no per-wheel `setOrbitPoint`).
    */
   private installPerspectiveOrbitPivotFromCursor() {
     const controls = this.world.camera.controls as CameraControls | undefined;
-    const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
-    if (!controls || !canvas) return;
+    if (!controls) return;
 
     this.orbitPivotControlStartHandler = () => {
       if (this.disposed || this.activeOrthoViewMode !== null) return;
@@ -976,17 +973,12 @@ export class ViewerEngine {
         (action & A.TOUCH_ZOOM_ROTATE) === A.TOUCH_ZOOM_ROTATE;
       if (!movesCamera) return;
 
-      if (isRotateOnly && this.pickOrbitPivotActive) {
-        void controls.stop?.();
-        controls.setOrbitPoint(
-          this.pickOrbitPivotWorld.x,
-          this.pickOrbitPivotWorld.y,
-          this.pickOrbitPivotWorld.z,
-        );
-        void controls.update?.(0);
-        return;
-      }
-
+      /**
+       * Orbit (rotate) must always use the cursor ray — same “canvas pick” as fresh gestures.
+       * A prior `pickOrbitPivotActive` from an element tap would otherwise lock rotation to that stored
+       * world point while the user is zoomed on another area (close-up, no new pick) and it feels
+       * like orbit ignores the pointer.
+       */
       if (!isRotateOnly && this.pickOrbitPivotActive) {
         return;
       }
@@ -994,28 +986,12 @@ export class ViewerEngine {
       this.applyOrbitPivotFromModelPickLikeTap(this.lastPointerNdc, controls);
     };
     controls.addEventListener("controlstart", this.orbitPivotControlStartHandler);
-
-    this.orbitPivotWheelHandler = (e: WheelEvent) => {
-      if (this.disposed || this.activeOrthoViewMode !== null) return;
-      if (this.pickOrbitPivotActive) return;
-      const c = this.world.camera.three;
-      if (!c || !(c as THREE.PerspectiveCamera).isPerspectiveCamera) return;
-      if (!controls.enabled) return;
-      if (e.target !== canvas && !canvas.contains(e.target as Node)) return;
-      const rect = canvas.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
-      this.wheelNdcForOrbit.set(
-        ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1,
-      );
-      this.applyOrbitPivotFromModelPickLikeTap(this.wheelNdcForOrbit, controls);
-    };
-    canvas.addEventListener("wheel", this.orbitPivotWheelHandler, { capture: true, passive: true });
   }
 
   /**
    * Same camera anchor as a tap on steel: sync ray fallback immediately, then {@link OBC.FastModelPickers#getFullPick}
    * to set {@link pickOrbitPivotWorld} / {@link pickOrbitPivotActive} (no selection callback).
+   * Perspective wheel zoom does not use this — it relies on {@link CameraControls#dollyToCursor}.
    */
   private applyOrbitPivotFromModelPickLikeTap(ndc: THREE.Vector2, controls: CameraControls): void {
     const pSync = this.worldOrbitPointFromPerspectiveNdc(ndc.clone());
@@ -1127,11 +1103,15 @@ export class ViewerEngine {
         }
         const d0 =
           ctrl && Number.isFinite(ctrl.distance) ? ctrl.distance : Math.max(8, span * 0.35);
-        return ray.at(Math.max(1, d0), new THREE.Vector3());
+        /** Avoid `Math.max(1, d0)`: when zoomed very close, spherical distance can be under one unit;
+         * forcing a 1 unit minimum along the ray misses the surface under the cursor. */
+        const tAlong = Math.max(persp.near * 24, d0);
+        return ray.at(tAlong, new THREE.Vector3());
       }
     }
     const d1 = ctrl && Number.isFinite(ctrl.distance) && ctrl.distance > 0 ? ctrl.distance : 25;
-    return ray.at(d1, new THREE.Vector3());
+    const tAlongNoModel = Math.max(persp.near * 24, d1);
+    return ray.at(tAlongNoModel, new THREE.Vector3());
   }
 
   /**
@@ -3791,15 +3771,10 @@ export class ViewerEngine {
         this.modelObject = null;
       }
       this.removePointerListeners();
-      const canvasEl = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
       const camCtrl = this.world.camera.controls as CameraControls | undefined;
       if (camCtrl && this.orbitPivotControlStartHandler) {
         camCtrl.removeEventListener("controlstart", this.orbitPivotControlStartHandler);
         this.orbitPivotControlStartHandler = null;
-      }
-      if (canvasEl && this.orbitPivotWheelHandler) {
-        canvasEl.removeEventListener("wheel", this.orbitPivotWheelHandler, { capture: true });
-        this.orbitPivotWheelHandler = null;
       }
       this.world.renderer?.dispose();
       this.world.camera.controls?.dispose();
