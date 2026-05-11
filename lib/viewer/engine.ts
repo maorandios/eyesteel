@@ -148,6 +148,13 @@ export class ViewerEngine {
   private readonly lastPointerNdc = new THREE.Vector2(0, 0);
   private downPos: { x: number; y: number; t: number; pointerType: string } | null = null;
   private pickCallback: ((hit: PickHit | null) => void) | null = null;
+  /**
+   * Last successful model-tap hit point (world). Orbit keeps this pivot until a miss tap, a
+   * programmatic camera move, or dispose — avoids rotate-start `getPointAt` choosing a different
+   * surface when the camera is far from the selection.
+   */
+  private pickOrbitPivotActive = false;
+  private readonly pickOrbitPivotWorld = new THREE.Vector3();
   private fragmentCameraHooksInstalled = false;
   /** `FragmentsManager.list` is only valid after {@link OBC.FragmentsManager.init}. */
   private fragmentsClippingListenersInstalled = false;
@@ -232,6 +239,11 @@ export class ViewerEngine {
    * selection effects) yields a visible "blink" then a stale view on the ThatOpen worker/main bridge.
    */
   private isolationChain: Promise<void> = Promise.resolve();
+
+  private clearStoredPickOrbitPivot(): void {
+    this.pickOrbitPivotActive = false;
+  }
+
   constructor(container: HTMLDivElement) {
     this.container = container;
     this.components = new OBC.Components();
@@ -470,6 +482,7 @@ export class ViewerEngine {
     if (this.disposed || !this.modelObject) return false;
     const box = new THREE.Box3().setFromObject(this.modelObject);
     if (box.isEmpty()) return false;
+    this.clearStoredPickOrbitPivot();
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z, 1);
@@ -515,6 +528,7 @@ export class ViewerEngine {
 
     const box = new THREE.Box3().setFromObject(this.modelObject);
     if (box.isEmpty()) return false;
+    this.clearStoredPickOrbitPivot();
 
     const size = box.getSize(new THREE.Vector3());
     const span = Math.max(size.x, size.y, size.z, 1);
@@ -586,6 +600,7 @@ export class ViewerEngine {
     const up = new THREE.Vector3().fromArray(snapshot.up);
 
     if (!ctrl) return;
+    this.clearStoredPickOrbitPivot();
 
     if (snapshot.orthoMode !== null) {
       this.detachOrthoResizeListener();
@@ -597,7 +612,6 @@ export class ViewerEngine {
       ortho.zoom = snapshot.orthoZoom;
       void ctrl.zoomTo(ortho.zoom, false);
       ctrl.updateCameraUp();
-      ctrl.setOrbitPoint(tgt.x, tgt.y, tgt.z);
       ctrl.setLookAt(pos.x, pos.y, pos.z, tgt.x, tgt.y, tgt.z, false);
       this.activeOrthoViewMode = snapshot.orthoMode;
       this.boundUseCamera?.(ortho);
@@ -611,10 +625,19 @@ export class ViewerEngine {
       this.perspectiveCamera.up.copy(up);
       this.world.scene.three.up.copy(up);
       ctrl.updateCameraUp();
-      ctrl.setOrbitPoint(tgt.x, tgt.y, tgt.z);
       ctrl.setLookAt(pos.x, pos.y, pos.z, tgt.x, tgt.y, tgt.z, false);
       this.boundUseCamera?.(this.perspectiveCamera);
     }
+    /**
+     * Do not call `CameraControls#setOrbitPoint` before `setLookAt` here: after swapping
+     * ortho ↔ perspective it runs against a stale camera matrix and corrupts target/offset; the
+     * saved pose is applied by `setLookAt` alone.
+     *
+     * Orthographic מצב בדיקה uses pan/truck/zoom — clear residual focal offset after restoring pose.
+     */
+    ctrl.setFocalOffset(0, 0, 0, false);
+    void ctrl.stop?.();
+    ctrl.update?.(0);
     if (!options?.preserveInspectionSession && this.inspectionSessionFramingBox !== null) {
       this.clearInspectionVisualizationSession();
     }
@@ -644,6 +667,7 @@ export class ViewerEngine {
 
   /** Store AABB refit bounds for orthographic מבט while inspecting (toolbar view cycling). */
   beginInspectionVisualizationSession(framingBox: THREE.Box3): void {
+    this.clearStoredPickOrbitPivot();
     this.inspectionSessionFramingBox = framingBox.clone();
   }
 
@@ -702,6 +726,7 @@ export class ViewerEngine {
     ) {
       return false;
     }
+    this.clearStoredPickOrbitPivot();
     const box = this.inspectionSessionFramingBox;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
@@ -782,7 +807,10 @@ export class ViewerEngine {
     c.infinityDolly = false;
   }
 
-  /** Rotate gestures orbit around the surface point under the cursor (desktop + touch). */
+  /**
+   * Rotate: in perspective, reuse the last model-tap world point as orbit pivot when set; otherwise
+   * pick the surface under the cursor at gesture start (legacy behavior).
+   */
   private installOrbitPivotOnRotateStart() {
     const controls = this.world.camera.controls;
     if (!controls) return;
@@ -795,8 +823,18 @@ export class ViewerEngine {
         action === A.TOUCH_DOLLY_ROTATE ||
         action === A.TOUCH_ZOOM_ROTATE;
       if (!isRotate) return;
+      if (this.disposed) return;
+      if (this.pickOrbitPivotActive && this.activeOrthoViewMode === null) {
+        controls.setOrbitPoint(
+          this.pickOrbitPivotWorld.x,
+          this.pickOrbitPivotWorld.y,
+          this.pickOrbitPivotWorld.z,
+        );
+        void controls.update?.(0);
+        return;
+      }
       const fragments = this.components.get(OBC.FragmentsManager);
-      if (!fragments.initialized || this.disposed) return;
+      if (!fragments.initialized) return;
       void (async () => {
         try {
           const pickers = this.components.get(OBC.FastModelPickers);
@@ -837,6 +875,7 @@ export class ViewerEngine {
 
   /** Camera along `(1,1,1)` diagonal — Y‑up matches fragment IFC placement (RX −90° → vertical along +Y). */
   private frameCameraIsoDiagonal(center: THREE.Vector3, radius: number) {
+    this.clearStoredPickOrbitPivot();
     const ctrl = this.world.camera.controls;
     const cam = this.world.camera.three as THREE.PerspectiveCamera;
     this.world.scene.three.up.set(0, 1, 0);
@@ -1465,11 +1504,6 @@ export class ViewerEngine {
             this.updateOrthoFrustumForInspectionSnapshot(this.inspectionSessionFramingBox);
           }
           this.measurementSessionCameraRevert = null;
-          const c = this.world.camera.controls;
-          /** CameraControls accumulates focal offset during pan trucks — revert snapshot alone keeps odd orbit feel. */
-          c?.setFocalOffset(0, 0, 0, false);
-          void c?.stop?.();
-          c?.update?.(0);
         }
       }
       this.viewerTool = tool;
@@ -1655,8 +1689,15 @@ export class ViewerEngine {
         const full = await picker.getFullPick(mouse);
         if (full && typeof full.localId === "number") {
           hit = { localId: full.localId, itemId: full.itemId };
+          this.pickOrbitPivotWorld.copy(full.point);
+          this.pickOrbitPivotActive = true;
           const c = this.world.camera.controls;
-          if (c) c.setOrbitPoint(full.point.x, full.point.y, full.point.z);
+          if (c) {
+            c.setOrbitPoint(full.point.x, full.point.y, full.point.z);
+            void c.update?.(0);
+          }
+        } else {
+          this.clearStoredPickOrbitPivot();
         }
       } catch (error) {
         console.error("[picker] gpu pick failed:", error);
@@ -2851,6 +2892,7 @@ export class ViewerEngine {
     if (!this.modelId) return;
     const set = map[this.modelId];
     if (!set || set.size === 0) return;
+    this.clearStoredPickOrbitPivot();
     try {
       const fragments = this.components.get(OBC.FragmentsManager);
       const boxes = await fragments.getBBoxes(map);
@@ -3352,6 +3394,7 @@ export class ViewerEngine {
 
   resetView() {
     if (this.disposed) return;
+    this.clearStoredPickOrbitPivot();
     if (this.activeOrthoViewMode !== null) {
       this.exitViewMode();
       return;
@@ -3381,6 +3424,7 @@ export class ViewerEngine {
 
   dispose() {
     if (this.disposed) return;
+    this.clearStoredPickOrbitPivot();
     this.clearInspectionVisualizationSession();
     this.shutdownHiddenRemainderSketchState();
     this.clearContextMainThreadVisuals();
