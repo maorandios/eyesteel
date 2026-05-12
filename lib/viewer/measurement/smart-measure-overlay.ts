@@ -10,12 +10,16 @@ function formatMm(meters: number): string {
   return Number.isFinite(mm) ? Math.round(mm).toLocaleString("he-IL") : "—";
 }
 
-function badgeStyle(bg: string): string {
+function badgeStyle(bg: string, clickable: boolean): string {
+  const ptr = clickable
+    ? `pointer-events:auto;cursor:pointer;touch-action:manipulation;`
+    : `pointer-events:none;`;
   return (
     `position:absolute;transform:translate(-50%,-50%);display:inline-flex;flex-direction:row;` +
     `direction:ltr;align-items:center;gap:4px;padding:5px 9px;border-radius:8px;font-size:12px;` +
     `font-weight:600;color:white;background:${bg};box-shadow:0 2px 8px rgba(0,0,0,.28);` +
-    `white-space:nowrap;z-index:48;pointer-events:none;`
+    `white-space:nowrap;z-index:48;` +
+    ptr
   );
 }
 
@@ -73,7 +77,15 @@ export class SmartMeasureOverlay {
   syncDimensionBadges(
     canvas: HTMLCanvasElement,
     camera: THREE.Camera,
-    specs: Array<{ id: string; world: THREE.Vector3; meters: number; variant: "main" | "break" }>,
+    specs: Array<{
+      id: string;
+      world: THREE.Vector3;
+      meters: number;
+      variant: "main" | "break";
+      /** When set + onPickSegment, badge toggles breakdown (גובה / אופקי) for this measurement */
+      segmentIndex?: number;
+    }>,
+    onPickSegment?: (segmentIndex: number) => void,
   ) {
     const scratch = new THREE.Vector3();
     const keep = new Set<string>();
@@ -88,8 +100,25 @@ export class SmartMeasureOverlay {
         this.layer.appendChild(el);
       }
       const bg = s.variant === "main" ? "#404040" : "#5c6b7c";
-      el.style.cssText = badgeStyle(bg);
+      const clickable = !!(onPickSegment !== undefined && s.segmentIndex !== undefined);
+      el.style.cssText = badgeStyle(bg, clickable);
       el.innerHTML = `<span>${MM_UNIT_HE}</span><span dir="ltr">${formatMm(s.meters)}</span>`;
+      if (clickable && onPickSegment !== undefined && s.segmentIndex !== undefined) {
+        const idx = s.segmentIndex;
+        el.tabIndex = 0;
+        el.setAttribute("role", "button");
+        el.dataset.eyeSteelSegmentIndex = String(idx);
+        el.onpointerdown = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onPickSegment(idx);
+        };
+      } else {
+        el.tabIndex = -1;
+        el.removeAttribute("role");
+        delete el.dataset.eyeSteelSegmentIndex;
+        el.onpointerdown = null;
+      }
 
       const px = project(s.world, camera, canvas, scratch);
       if (!px.visible) {

@@ -81,13 +81,17 @@ export class SmartMeasureVisuals {
     this.root.add(this.draftLine);
   }
 
-  addCompleted(segment: CompletedSmartSegment, showBreakdown: boolean) {
+  addCompleted(
+    segment: CompletedSmartSegment,
+    breakdownSegmentIndex: number | null,
+    segmentIndex: number,
+  ) {
     const { p1, p2, metrics } = segment;
     const gMain = lineGeom(p1, p2);
     const main = new THREE.Line(gMain, this.matMain);
     this.completed.add(main);
 
-    if (!showBreakdown) return;
+    if (breakdownSegmentIndex !== segmentIndex) return;
 
     const extra = new THREE.Group();
     extra.add(new THREE.Line(lineGeom(p1, metrics.corner), this.matBreak));
@@ -95,8 +99,8 @@ export class SmartMeasureVisuals {
     this.completed.add(extra);
   }
 
-  rebuildCompleted(segments: CompletedSmartSegment[], showBreakdown: boolean) {
+  rebuildCompleted(segments: CompletedSmartSegment[], breakdownSegmentIndex: number | null) {
     this.clearCompleted();
-    for (const s of segments) this.addCompleted(s, showBreakdown);
+    segments.forEach((s, i) => this.addCompleted(s, breakdownSegmentIndex, i));
   }
 }

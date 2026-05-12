@@ -6,50 +6,48 @@ export type SmartMeasurePhase = "pickFirst" | "pickSecond";
 
 interface SmartMeasureStoreState {
   phase: SmartMeasurePhase;
-  showBreakdown: boolean;
-  setShowBreakdown: (v: boolean) => void;
-  /** Metrics card visible; breakdown geometry follows when open via toggle. */
-  measurementDetailsOpen: boolean;
-  setMeasurementDetailsOpen: (v: boolean) => void;
-  toggleMeasurementDetailsPanel: () => void;
-  /** Last finished two‑point measurement (millimetres). */
-  directMm: number | null;
-  heightMm: number | null;
-  horizontalMm: number | null;
-  hintHe: string;
   setPhase: (p: SmartMeasurePhase) => void;
+  hintHe: string;
   setHint: (s: string) => void;
-  applyCompleted: (directMm: number, heightMm: number, horizontalMm: number) => void;
+
+  /** millimetres per completed segment — same order as MeasurementController segments */
+  segmentsMm: Array<{ directMm: number; heightMm: number; horizontalMm: number }>;
+  appendSegmentMetrics: (directMm: number, heightMm: number, horizontalMm: number) => void;
+
+  /** Non-null ⇒ show גובה / אופקי breakdown lines + badges for this segment only. לחיצה חוזרת על אותה תווית סוגרת. */
+  detailsSegmentIndex: number | null;
+  toggleBreakdownForSegment: (segmentIndex: number) => void;
+  clearBreakdown: () => void;
+
   resetSession: () => void;
 }
 
-export const useSmartMeasureStore = create<SmartMeasureStoreState>((set) => ({
+export const useSmartMeasureStore = create<SmartMeasureStoreState>((set, get) => ({
   phase: "pickFirst",
-  showBreakdown: false,
-  setShowBreakdown: (showBreakdown) => set({ showBreakdown }),
-  measurementDetailsOpen: false,
-  setMeasurementDetailsOpen: (measurementDetailsOpen) => set({ measurementDetailsOpen }),
-  toggleMeasurementDetailsPanel: () =>
-    set((s) => {
-      const open = !s.measurementDetailsOpen;
-      return { measurementDetailsOpen: open, showBreakdown: open };
-    }),
-  directMm: null,
-  heightMm: null,
-  horizontalMm: null,
+  segmentsMm: [],
   hintHe: "לחץ על נקודה ראשונה על המודל",
   setPhase: (phase) => set({ phase }),
   setHint: (hintHe) => set({ hintHe }),
-  applyCompleted: (directMm, heightMm, horizontalMm) =>
-    set({ directMm, heightMm, horizontalMm, phase: "pickFirst", hintHe: "לחץ על נקודה ראשונה על המודל" }),
+  appendSegmentMetrics: (directMm, heightMm, horizontalMm) =>
+    set((s) => ({
+      segmentsMm: [...s.segmentsMm, { directMm, heightMm, horizontalMm }],
+      phase: "pickFirst",
+      hintHe: "לחץ על נקודה ראשונה על המודל",
+    })),
+  detailsSegmentIndex: null,
+  toggleBreakdownForSegment: (segmentIndex) => {
+    const { segmentsMm, detailsSegmentIndex } = get();
+    if (segmentIndex < 0 || segmentIndex >= segmentsMm.length) return;
+    set({
+      detailsSegmentIndex: detailsSegmentIndex === segmentIndex ? null : segmentIndex,
+    });
+  },
+  clearBreakdown: () => set({ detailsSegmentIndex: null }),
   resetSession: () =>
     set({
       phase: "pickFirst",
-      directMm: null,
-      heightMm: null,
-      horizontalMm: null,
+      segmentsMm: [],
       hintHe: "לחץ על נקודה ראשונה על המודל",
-      showBreakdown: false,
-      measurementDetailsOpen: false,
+      detailsSegmentIndex: null,
     }),
 }));

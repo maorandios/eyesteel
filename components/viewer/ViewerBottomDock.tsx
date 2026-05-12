@@ -3,7 +3,6 @@
 import type { ComponentProps, ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { useSmartMeasureStore } from "@/lib/state/smart-measure-store";
 import {
   VIEW_MODE_LABELS_HE,
   VIEW_MODE_ORDER,
@@ -31,20 +30,18 @@ import {
   Blend,
   Bolt,
   Camera,
-  Check,
   CircleX,
   FoldHorizontal,
   Frame,
   Funnel,
   Fullscreen,
   LayoutList,
-  ListTree,
   Pencil,
+  RotateCcw,
   RulerDimensionLine,
   Search,
   SquaresIntersect,
   SquaresUnite,
-  Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -125,7 +122,11 @@ interface Props {
   selectionMode: SelectionMode;
   onSelectionModeChange: (mode: SelectionMode) => void;
   onDashboard: () => void;
+  /** When the details side panel is open (blue dock icon). */
+  dashboardSheetOpen?: boolean;
   onViewFilter?: () => void;
+  /** When the filter side panel is open (blue dock icon). */
+  filterSheetOpen?: boolean;
   /** הבורג: hide mechanical fasteners globally; openings/voids stay visible */
   hideFastenersKeepHoles?: boolean;
   onToggleHideFastenersKeepHoles?: () => void;
@@ -167,7 +168,6 @@ interface Props {
   /** When בחירה מרובה session is active, pill HUD above main dock (same chrome as clipping). */
   multiSelectHud?: MultiSelectHudProps;
   markupDrawingActive?: boolean;
-  markupDrawingHasInk?: boolean;
   markupDrawingDisabled?: boolean;
   onMarkupDrawingToggle?: () => void;
   onMarkupDrawingClear?: () => void;
@@ -183,7 +183,9 @@ export function ViewerBottomDock({
   selectionMode,
   onSelectionModeChange,
   onDashboard,
+  dashboardSheetOpen = false,
   onViewFilter,
+  filterSheetOpen = false,
   hideFastenersKeepHoles = false,
   onToggleHideFastenersKeepHoles,
   onGlobalSearch,
@@ -209,7 +211,6 @@ export function ViewerBottomDock({
   multiSelectHud,
   onMultiSelectEnter,
   markupDrawingActive = false,
-  markupDrawingHasInk = false,
   markupDrawingDisabled = false,
   onMarkupDrawingToggle,
   onMarkupDrawingClear,
@@ -220,9 +221,6 @@ export function ViewerBottomDock({
   const [viewOpen, setViewOpen] = useState(false);
   const [clipOpen, setClipOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-
-  const measurementDetailsOpen = useSmartMeasureStore((s) => s.measurementDetailsOpen);
-  const toggleMeasurementDetailsPanel = useSmartMeasureStore((s) => s.toggleMeasurementDetailsPanel);
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
@@ -378,6 +376,80 @@ export function ViewerBottomDock({
           <MultiSelectActionBar {...multiSelectHud} />
         </div>
       ) : null}
+      {measurementActive ? (
+        <div
+          className="pointer-events-auto flex w-full shrink-0 justify-center"
+          role="region"
+          aria-label="כלי מדידה"
+        >
+          <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
+            <DockSubmenuPill
+              label="איפוס"
+              labelClassName="max-w-[3.5rem] text-zinc-100 sm:max-w-[3.75rem]"
+              title="נקה את כל המדידות"
+              aria-label="איפוס מדידות"
+              className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
+              onClick={onMeasurementClear}
+            >
+              <RotateCcw aria-hidden />
+            </DockSubmenuPill>
+            <Button
+              type="button"
+              variant="ghost"
+              aria-label="סיים מדידה"
+              title="יציאה ממדידה"
+              onClick={onMeasurementFinish}
+              className={cn(
+                "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
+                "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
+                "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+              )}
+            >
+              <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">
+                <CircleX className="size-[1.05rem] shrink-0 sm:size-[1.15rem]" aria-hidden />
+              </span>
+            </Button>
+          </DockSubmenuBar>
+        </div>
+      ) : null}
+      {markupDrawingActive && onMarkupDrawingToggle ? (
+        <div
+          className="pointer-events-auto flex w-full shrink-0 justify-center"
+          role="region"
+          aria-label="כלי סימון"
+        >
+          <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
+            {onMarkupDrawingClear ? (
+              <DockSubmenuPill
+                label="איפוס"
+                labelClassName="max-w-[3.5rem] text-zinc-100 sm:max-w-[3.75rem]"
+                title="נקה ציור מהמסך"
+                aria-label="איפוס סימון"
+                className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
+                onClick={onMarkupDrawingClear}
+              >
+                <RotateCcw aria-hidden />
+              </DockSubmenuPill>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              aria-label="סגור מצב סימון"
+              title="יציאה מסימון"
+              onClick={onMarkupDrawingToggle}
+              className={cn(
+                "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
+                "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
+                "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+              )}
+            >
+              <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">
+                <CircleX className="size-[1.05rem] shrink-0 sm:size-[1.15rem]" aria-hidden />
+              </span>
+            </Button>
+          </DockSubmenuBar>
+        </div>
+      ) : null}
       <div
         className={cn(
           "pointer-events-auto flex max-w-[min(100vw-1rem,92rem)] flex-nowrap items-center justify-center gap-x-0 overflow-visible rounded-full border border-zinc-600/90 bg-zinc-950/95 px-1 py-1.5 shadow-2xl backdrop-blur-md sm:gap-x-px sm:px-2 sm:py-2",
@@ -390,12 +462,28 @@ export function ViewerBottomDock({
           </DockPillButton>
         )}
 
-        <DockPillButton label="דאשבורד" title="דאשבורד" aria-label="דאשבורד" onClick={onDashboard}>
+        <DockPillButton
+          label="דאשבורד"
+          aria-pressed={dashboardSheetOpen}
+          submenuOpen={dashboardSheetOpen}
+          labelClassName={dashboardSheetOpen ? "text-zinc-100" : undefined}
+          title="דאשבורד — לחיצה נוספת סוגרת את הפאנל"
+          aria-label="דאשבורד"
+          onClick={onDashboard}
+        >
           <LayoutList aria-hidden />
         </DockPillButton>
 
         {onViewFilter && (
-          <DockPillButton label="סינון" title="סינון תצוגה" aria-label="סינון" onClick={onViewFilter}>
+          <DockPillButton
+            label="סינון"
+            aria-pressed={filterSheetOpen}
+            submenuOpen={filterSheetOpen}
+            labelClassName={filterSheetOpen ? "text-zinc-100" : undefined}
+            title="סינון תצוגה — לחיצה נוספת סוגרת את הפאנל"
+            aria-label="סינון"
+            onClick={onViewFilter}
+          >
             <Funnel aria-hidden />
           </DockPillButton>
         )}
@@ -578,13 +666,16 @@ export function ViewerBottomDock({
             label="סימון"
             aria-pressed={markupDrawingActive}
             disabled={markupDrawingDisabled}
+            submenuOpen={markupDrawingActive && !markupDrawingDisabled}
+            labelClassName={
+              markupDrawingActive && !markupDrawingDisabled ? "text-zinc-100" : undefined
+            }
             title={
               markupDrawingDisabled
                 ? "אינו זמין במדידה או לפני טעינת המודל"
-                : "סימון וציור על המסך"
+                : "סימון וציור על המסך — איפוס ויציאה בתפריט למעלה"
             }
             aria-label="סימון"
-            className={cn(markupDrawingActive && "bg-red-500/12 hover:bg-red-500/20")}
             onClick={onMarkupDrawingToggle}
           >
             <Pencil aria-hidden />
@@ -594,9 +685,10 @@ export function ViewerBottomDock({
         <DockPillButton
           label="מדידה"
           aria-pressed={measurementActive}
-          title="מדידה"
+          submenuOpen={measurementActive}
+          labelClassName={measurementActive ? "text-zinc-100" : undefined}
+          title="מדידה — לחיצה על תווית המרחק מציגה גובה ומרחק אופקי במודל. איפוס ויציאה בתפריט למעלה."
           aria-label="מדידה"
-          className={cn(measurementActive && "bg-amber-500/12 hover:bg-amber-500/20")}
           onClick={onMeasurementToggle}
         >
           <RulerDimensionLine aria-hidden />
@@ -611,53 +703,6 @@ export function ViewerBottomDock({
           >
             <Camera aria-hidden />
           </DockPillButton>
-        )}
-
-        {(markupDrawingActive || markupDrawingHasInk) && onMarkupDrawingClear && (
-          <DockPillButton
-            label="נקה סימון"
-            title="נקה ציור"
-            aria-label="נקה סימון"
-            className="text-zinc-400 hover:bg-zinc-800/30 hover:text-zinc-200"
-            onClick={onMarkupDrawingClear}
-          >
-            <Trash2 aria-hidden />
-          </DockPillButton>
-        )}
-
-        {measurementActive && (
-          <>
-            <DockPillButton
-              label="פרטי מדידות"
-              aria-pressed={measurementDetailsOpen}
-              title="פרטי מדידות"
-              aria-label="פרטי מדידות"
-              className={cn(
-                measurementDetailsOpen && "bg-blue-500/12 hover:bg-blue-500/22",
-              )}
-              onClick={() => toggleMeasurementDetailsPanel()}
-            >
-              <ListTree aria-hidden />
-            </DockPillButton>
-            <DockPillButton
-              label="נקה מדידות"
-              title="נקה מדידות"
-              aria-label="נקה מדידות"
-              className="text-zinc-400 hover:bg-zinc-800/30 hover:text-zinc-200"
-              onClick={onMeasurementClear}
-            >
-              <Trash2 aria-hidden />
-            </DockPillButton>
-            <DockPillButton
-              label="סיים"
-              title="סיים מדידה"
-              aria-label="סיים מדידה"
-              className="text-zinc-400 hover:bg-zinc-800/30 hover:text-zinc-200"
-              onClick={onMeasurementFinish}
-            >
-              <Check aria-hidden />
-            </DockPillButton>
-          </>
         )}
       </div>
     </div>

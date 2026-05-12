@@ -5,7 +5,6 @@ import { useShallow } from "zustand/react/shallow";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { CompactModeNav } from "@/components/viewer/CompactModeNav";
-import { SmartMeasurementCard } from "@/components/viewer/SmartMeasurementCard";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
 import { IsolationActionBar } from "@/components/viewer/IsolationActionBar";
 import { Button } from "@/components/ui/button";
@@ -91,7 +90,6 @@ export default function ViewerPage() {
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [markupDrawingEnabled, setMarkupDrawingEnabled] = useState(false);
   const [drawingClearSignal, setDrawingClearSignal] = useState(0);
-  const [hasMarkupInk, setHasMarkupInk] = useState(false);
   const markupLayerRef = useRef<DrawingMarkupLayerHandle>(null);
   const [snapshotCopyToast, setSnapshotCopyToast] = useState(false);
   const [snapshotDownloadUrl, setSnapshotDownloadUrl] = useState<string | null>(null);
@@ -170,10 +168,6 @@ export default function ViewerPage() {
   }, [file, setViewerTool]);
 
   useEffect(() => {
-    if (loadingState !== "ready") setHasMarkupInk(false);
-  }, [loadingState]);
-
-  useEffect(() => {
     if (!file) router.replace("/");
   }, [file, router]);
 
@@ -230,7 +224,7 @@ export default function ViewerPage() {
 
   useEffect(() => {
     if (viewerTool !== "measurement") {
-      useSmartMeasureStore.getState().setMeasurementDetailsOpen(false);
+      useSmartMeasureStore.getState().clearBreakdown();
     }
   }, [viewerTool]);
 
@@ -273,6 +267,22 @@ export default function ViewerPage() {
     clearViewModeStore();
     useClippingStore.getState().setClipSectionOrthoActive(false);
   }, [engine, loadingState, clearViewModeStore]);
+
+  const toggleDashboardSheet = useCallback(() => {
+    if (activeSheet === "details") {
+      setActiveSheet("none");
+      return;
+    }
+    setActiveSheet("details");
+  }, [activeSheet, setActiveSheet]);
+
+  const toggleFilterSheet = useCallback(() => {
+    if (activeSheet === "filter") {
+      setActiveSheet("none");
+      return;
+    }
+    setActiveSheet("filter");
+  }, [activeSheet, setActiveSheet]);
 
   const handlePickClippingDirection = useCallback(
     (dir: ClippingDirectionId) => {
@@ -1221,7 +1231,6 @@ export default function ViewerPage() {
           ref={markupLayerRef}
           active={markupDrawingEnabled}
           clearSignal={drawingClearSignal}
-          onInkPresenceChange={setHasMarkupInk}
         />
       )}
 
@@ -1312,12 +1321,12 @@ export default function ViewerPage() {
       <ViewerBottomDock
         selectionMode={selectionMode}
         onSelectionModeChange={handleDockSelectionMode}
-        onDashboard={() => setActiveSheet("details")}
+        onDashboard={toggleDashboardSheet}
+        dashboardSheetOpen={activeSheet === "details" && !inspectionActive}
         onViewFilter={
-          loadingState === "ready" && analyzerData
-            ? () => setActiveSheet("filter")
-            : undefined
+          loadingState === "ready" && analyzerData ? toggleFilterSheet : undefined
         }
+        filterSheetOpen={activeSheet === "filter"}
         hideFastenersKeepHoles={hideAllFastenersKeepHoles}
         onToggleHideFastenersKeepHoles={
           loadingState === "ready" ? toggleHideAllFastenersKeepHoles : undefined
@@ -1385,20 +1394,16 @@ export default function ViewerPage() {
         }
         onMultiSelectEnter={handleEnterMultiSelect}
         markupDrawingActive={markupDrawingEnabled}
-        markupDrawingHasInk={hasMarkupInk}
         markupDrawingDisabled={loadingState !== "ready" || viewerTool === "measurement"}
         onMarkupDrawingToggle={
           loadingState === "ready" ? handleMarkupDrawingToggle : undefined
         }
         onMarkupDrawingClear={
-          loadingState === "ready" && (markupDrawingEnabled || hasMarkupInk)
-            ? handleMarkupDrawingClear
-            : undefined
+          loadingState === "ready" ? handleMarkupDrawingClear : undefined
         }
       />
       )}
 
-      {viewerTool === "measurement" && <SmartMeasurementCard />}
 
       {analyzerData && (
         <GlobalSearchOverlay

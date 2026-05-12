@@ -52,7 +52,7 @@ export class MeasurementController {
 
   private hoverRaf = 0;
   private unsubBreakdown: (() => void) | null = null;
-  private lastBreakdownShown = false;
+  private lastBreakdownKey: string | null = null;
 
   constructor(components: OBC.Components) {
     this.components = components;
@@ -96,20 +96,26 @@ export class MeasurementController {
     useSmartMeasureStore.getState().setHint("לחץ על נקודה ראשונה על המודל");
 
     this.unsubBreakdown?.();
-    this.lastBreakdownShown = useSmartMeasureStore.getState().showBreakdown;
-    this.unsubBreakdown = useSmartMeasureStore.subscribe((state) => {
-      if (state.showBreakdown === this.lastBreakdownShown) return;
-      this.lastBreakdownShown = state.showBreakdown;
+    this.lastBreakdownKey = null;
+    const syncBreakdown = () => {
+      const { detailsSegmentIndex } = useSmartMeasureStore.getState();
+      const bd = detailsSegmentIndex;
+      const key = `${bd ?? "-"}`;
+      if (key === this.lastBreakdownKey) return;
+      this.lastBreakdownKey = key;
       if (!this.visuals) return;
-      this.visuals.rebuildCompleted(this.segments, state.showBreakdown);
+      this.visuals.rebuildCompleted(this.segments, bd);
       void this.attachedWorld?.renderer?.update?.();
-    });
+    };
+    this.unsubBreakdown = useSmartMeasureStore.subscribe(syncBreakdown);
+    syncBreakdown();
   }
 
   deactivate() {
     this.active = false;
     this.unsubBreakdown?.();
     this.unsubBreakdown = null;
+    this.lastBreakdownKey = null;
     this.cancelHoverRaf();
     this.hoverWorld = null;
     this.visuals?.clearDraft();
@@ -216,10 +222,23 @@ export class MeasurementController {
 
     const canvas = world.renderer.three.domElement;
     const camera = world.camera.three;
-    const showBreakdown = useSmartMeasureStore.getState().showBreakdown;
+    const { detailsSegmentIndex } = useSmartMeasureStore.getState();
+    const breakdownFor = detailsSegmentIndex;
 
-    const specs: Array<{ id: string; world: THREE.Vector3; meters: number; variant: "main" | "break" }> =
-      [];
+    const specs: Array<{
+      id: string;
+      world: THREE.Vector3;
+      meters: number;
+      variant: "main" | "break";
+      segmentIndex?: number;
+    }> = [];
+
+    const onPick =
+      this.active && this.segments.length > 0
+        ? (idx: number) => {
+            useSmartMeasureStore.getState().toggleBreakdownForSegment(idx);
+          }
+        : undefined;
 
     this.segments.forEach((seg, i) => {
       const mid = new THREE.Vector3().addVectors(seg.p1, seg.p2).multiplyScalar(0.5);
@@ -228,8 +247,9 @@ export class MeasurementController {
         world: mid,
         meters: seg.metrics.directM,
         variant: "main",
+        segmentIndex: i,
       });
-      if (showBreakdown) {
+      if (breakdownFor === i) {
         const midV = new THREE.Vector3().addVectors(seg.p1, seg.metrics.corner).multiplyScalar(0.5);
         const midH = new THREE.Vector3().addVectors(seg.metrics.corner, seg.p2).multiplyScalar(0.5);
         specs.push({
@@ -237,17 +257,19 @@ export class MeasurementController {
           world: midV,
           meters: seg.metrics.heightM,
           variant: "break",
+          segmentIndex: i,
         });
         specs.push({
           id: `seg-${i}-h`,
           world: midH,
           meters: seg.metrics.horizontalM,
           variant: "break",
+          segmentIndex: i,
         });
       }
     });
 
-    this.overlay.syncDimensionBadges(canvas, camera, specs);
+    this.overlay.syncDimensionBadges(canvas, camera, specs, onPick);
 
     if (this.active) {
       this.overlay.setSnapMarker(canvas, camera, this.hoverWorld);
@@ -305,14 +327,20 @@ export class MeasurementController {
     const segment: CompletedSmartSegment = { p1, p2, metrics };
     this.segments.push(segment);
 
-    const showBreakdown = useSmartMeasureStore.getState().showBreakdown;
-    visuals.addCompleted(segment, showBreakdown);
-
-    useSmartMeasureStore.getState().applyCompleted(
+    useSmartMeasureStore.getState().appendSegmentMetrics(
       metrics.directM * 1000,
       metrics.heightM * 1000,
       metrics.horizontalM * 1000,
     );
+
+    const store = useSmartMeasureStore.getState();
+    const breakdownIdx = store.detailsSegmentIndex;
+    const segmentIndex = this.segments.length - 1;
+    visuals.addCompleted(segment, breakdownIdx, segmentIndex);
+
+    if (this.segments.length === 1) {
+      useSmartMeasureStore.getState().setHint("לחץ על תווית המרחק להצגת גובה ומרחק אופקי; לחיצה נוספת סוגרת.");
+    }
 
     void world.renderer?.update?.();
   }
