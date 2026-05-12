@@ -8,7 +8,6 @@ import { CompactModeNav } from "@/components/viewer/CompactModeNav";
 import { SmartMeasurementCard } from "@/components/viewer/SmartMeasurementCard";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
 import { IsolationActionBar } from "@/components/viewer/IsolationActionBar";
-import { MultiSelectActionBar } from "@/components/viewer/MultiSelectActionBar";
 import { Button } from "@/components/ui/button";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
@@ -683,15 +682,20 @@ export default function ViewerPage() {
     if (ok) useIsolationStore.getState().setIsolation("hidden", [...ids]);
   }, [engine, isolationApplyOpts, isolationRefs]);
 
-  const handleIsolationShowAll = useCallback(async () => {
+  /** Same visual reset as “הצג הכל” — used from בחירה מרובה submenuאיפוס/X without requiring the isolation bar. */
+  const restoreFullModelIsolationState = useCallback(async () => {
     if (!engine) return;
     useViewFilterStore.getState().exitGhostRevealMode();
     await engine.clearIsolationVisuals();
     useIsolationStore.getState().clearIsolation();
     engine.setTransparency(useAppStore.getState().transparencyEnabled);
     await reapplyViewFilterIfNeeded(engine);
-    useMultiSelectStore.getState().exitMultiSelectSession();
   }, [engine, reapplyViewFilterIfNeeded]);
+
+  const handleIsolationShowAll = useCallback(async () => {
+    await restoreFullModelIsolationState();
+    useMultiSelectStore.getState().exitMultiSelectSession();
+  }, [restoreFullModelIsolationState]);
 
   const handleEnterMultiSelect = useCallback(() => {
     if (!engine || viewerTool === "measurement" || isolationMode !== "none") return;
@@ -709,7 +713,6 @@ export default function ViewerPage() {
     const ok = await engine.applyIsolation("isolated", new Set(ids), { focus: true });
     if (ok) {
       useIsolationStore.getState().setIsolation("isolated", ids);
-      useMultiSelectStore.getState().exitMultiSelectSession();
     }
   }, [engine]);
 
@@ -720,7 +723,6 @@ export default function ViewerPage() {
     const ok = await engine.applyIsolation("context", new Set(ids), { focus: true });
     if (ok) {
       useIsolationStore.getState().setIsolation("context", ids);
-      useMultiSelectStore.getState().exitMultiSelectSession();
     }
   }, [engine]);
 
@@ -731,21 +733,22 @@ export default function ViewerPage() {
     const ok = await engine.applyIsolation("hidden", new Set(ids), { focus: true });
     if (ok) {
       useIsolationStore.getState().setIsolation("hidden", ids);
-      useMultiSelectStore.getState().exitMultiSelectSession();
     }
   }, [engine]);
 
   const handleMultiClear = useCallback(async () => {
+    await restoreFullModelIsolationState();
     useMultiSelectStore.getState().clearSelected();
-    await engine?.highlightFragmentLocalSet(new Set());
-    setSelectionStatus("בחירה מרובה: נוקו בחירות");
-  }, [engine]);
+    if (engine) await engine.highlightFragmentLocalSet(new Set());
+    setSelectionStatus("בחירה מרובה: איפוס — כל המודל מוצג, אפשר לבחור מחדש");
+  }, [engine, restoreFullModelIsolationState]);
 
   const handleMultiDone = useCallback(async () => {
+    await restoreFullModelIsolationState();
     useMultiSelectStore.getState().exitMultiSelectSession();
-    await engine?.highlightFragmentLocalSet(new Set());
+    if (engine) await engine.highlightFragmentLocalSet(new Set());
     setSelectionStatus("מצב בחירה רגיל");
-  }, [engine]);
+  }, [engine, restoreFullModelIsolationState]);
 
   const selectAssembly = useCallback(
     async (assembly: AnalyzerAssembly | null, opts?: { focusCamera?: boolean }) => {
@@ -1268,22 +1271,6 @@ export default function ViewerPage() {
         onShowAll={() => void handleIsolationShowAll()}
       />
 
-      <MultiSelectActionBar
-        visible={
-          !inspectionActive &&
-          pickInteractionMode === "multi" &&
-          loadingState === "ready" &&
-          isolationMode === "none"
-        }
-        selectedCount={multiSelectedCount}
-        disabled={!engine || viewerTool === "measurement"}
-        onIsolate={() => void handleMultiIsolate()}
-        onContext={() => void handleMultiContext()}
-        onHide={() => void handleMultiHide()}
-        onClear={() => void handleMultiClear()}
-        onDone={() => void handleMultiDone()}
-      />
-
       <PartInspectionCallout
         visible={
           loadingState === "ready" &&
@@ -1377,9 +1364,24 @@ export default function ViewerPage() {
         multiSelectActive={pickInteractionMode === "multi"}
         multiSelectEnterDisabled={
           loadingState !== "ready" ||
-          isolationMode !== "none" ||
           viewerTool === "measurement" ||
           markupDrawingEnabled
+        }
+        multiSelectIsolationBlocksEnter={isolationMode !== "none"}
+        multiSelectHud={
+          !inspectionActive &&
+          pickInteractionMode === "multi" &&
+          loadingState === "ready"
+            ? {
+                selectedCount: multiSelectedCount,
+                disabled: !engine || viewerTool === "measurement",
+                onIsolate: () => void handleMultiIsolate(),
+                onContext: () => void handleMultiContext(),
+                onHide: () => void handleMultiHide(),
+                onClear: () => void handleMultiClear(),
+                onDone: () => void handleMultiDone(),
+              }
+            : undefined
         }
         onMultiSelectEnter={handleEnterMultiSelect}
         markupDrawingActive={markupDrawingEnabled}

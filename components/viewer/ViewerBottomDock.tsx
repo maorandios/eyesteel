@@ -15,6 +15,7 @@ import {
   DockSubmenuPill,
 } from "@/components/viewer/dock-submenu";
 import { ClippingHudRow } from "@/components/viewer/ClippingHudRow";
+import { MultiSelectActionBar, type MultiSelectHudProps } from "@/components/viewer/MultiSelectActionBar";
 import {
   CLIPPING_DIRECTION_ORDER,
   CLIPPING_LABELS_HE,
@@ -156,8 +157,15 @@ interface Props {
   clippingDisabled?: boolean;
   onPickClippingDirection: (direction: ClippingDirectionId) => void;
   multiSelectActive?: boolean;
+  /** Guards starting בחירה מרובה (loading/measure/markup); does not include isolation. */
   multiSelectEnterDisabled?: boolean;
+  /**
+   * When true and בחירה מרובה not active yet, disables the dock tile — allows staying in session after isolation.
+   */
+  multiSelectIsolationBlocksEnter?: boolean;
   onMultiSelectEnter?: () => void;
+  /** When בחירה מרובה session is active, pill HUD above main dock (same chrome as clipping). */
+  multiSelectHud?: MultiSelectHudProps;
   markupDrawingActive?: boolean;
   markupDrawingHasInk?: boolean;
   markupDrawingDisabled?: boolean;
@@ -197,6 +205,8 @@ export function ViewerBottomDock({
   onPickClippingDirection,
   multiSelectActive = false,
   multiSelectEnterDisabled = false,
+  multiSelectIsolationBlocksEnter = false,
+  multiSelectHud,
   onMultiSelectEnter,
   markupDrawingActive = false,
   markupDrawingHasInk = false,
@@ -363,6 +373,11 @@ export function ViewerBottomDock({
           <ClippingHudRow {...clippingHud} />
         </div>
       ) : null}
+      {multiSelectHud ? (
+        <div className="pointer-events-auto flex w-full shrink-0 justify-center">
+          <MultiSelectActionBar {...multiSelectHud} />
+        </div>
+      ) : null}
       <div
         className={cn(
           "pointer-events-auto flex max-w-[min(100vw-1rem,92rem)] flex-nowrap items-center justify-center gap-x-0 overflow-visible rounded-full border border-zinc-600/90 bg-zinc-950/95 px-1 py-1.5 shadow-2xl backdrop-blur-md sm:gap-x-px sm:px-2 sm:py-2",
@@ -511,11 +526,12 @@ export function ViewerBottomDock({
 
         <DockPillButton
           label="שרטוט"
+          submenuOpen={sketchModeActive && !sketchDisabled}
+          labelClassName={sketchModeActive && !sketchDisabled ? "text-zinc-100" : undefined}
           aria-pressed={sketchModeActive}
           disabled={sketchDisabled}
           title="מצב סקיצה ושרטוט"
           aria-label="שרטוט"
-          className={cn(sketchModeActive && "bg-white/[0.07] hover:bg-white/12")}
           onClick={onSketchToggle}
         >
           <Frame aria-hidden />
@@ -524,7 +540,26 @@ export function ViewerBottomDock({
         <DockPillButton
           label="בחירה מרובה"
           aria-pressed={multiSelectActive}
-          disabled={multiSelectEnterDisabled || measurementActive || markupDrawingActive}
+          disabled={
+            multiSelectEnterDisabled ||
+            measurementActive ||
+            markupDrawingActive ||
+            (!multiSelectActive && multiSelectIsolationBlocksEnter)
+          }
+          submenuOpen={
+            multiSelectActive &&
+            !multiSelectEnterDisabled &&
+            !measurementActive &&
+            !markupDrawingActive
+          }
+          labelClassName={
+            multiSelectActive &&
+            !multiSelectEnterDisabled &&
+            !measurementActive &&
+            !markupDrawingActive
+              ? "text-zinc-100"
+              : undefined
+          }
           title={
             measurementActive
               ? "צא ממדידה כדי להפעיל בחירה מרובה"
@@ -533,7 +568,6 @@ export function ViewerBottomDock({
                 : "בחירה מרובה"
           }
           aria-label="בחירה מרובה"
-          className={cn(multiSelectActive && "bg-sky-500/12 hover:bg-sky-500/20")}
           onClick={() => onMultiSelectEnter?.()}
         >
           <Blend aria-hidden />

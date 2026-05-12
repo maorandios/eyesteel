@@ -31,11 +31,18 @@ export function DockSubmenuBar({
 
 export function DockSubmenuPill({
   label,
+  labelClassName,
   children,
   selected,
   className,
   ...props
-}: { label: string; children: ReactNode; selected?: boolean } & ComponentProps<typeof Button>) {
+}: {
+  label: string;
+  /** Merged after {@link dockSubLabelClass} for wider / denser captions. */
+  labelClassName?: string;
+  children: ReactNode;
+  selected?: boolean;
+} & ComponentProps<typeof Button>) {
   return (
     <Button
       type="button"
@@ -61,7 +68,7 @@ export function DockSubmenuPill({
       >
         {children}
       </span>
-      <span className={dockSubLabelClass}>{label}</span>
+      <span className={cn(dockSubLabelClass, labelClassName)}>{label}</span>
     </Button>
   );
 }
