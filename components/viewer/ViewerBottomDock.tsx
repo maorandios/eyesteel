@@ -715,7 +715,9 @@ export function ViewerBottomDock({
               ? "צא ממדידה כדי להפעיל בחירה מרובה"
               : markupDrawingActive
                 ? "צא ממצב ציור כדי להפעיל בחירה מרובה"
-                : "בחירה מרובה"
+                : multiSelectActive
+                  ? "בחירה מרובה — לחיצה נוספת יוצאת מהמצב"
+                  : "בחירה מרובה"
           }
           aria-label="בחירה מרובה"
           onClick={() => onMultiSelectEnter?.()}

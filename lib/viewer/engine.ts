@@ -64,6 +64,9 @@ type CameraControlsOrbital = CameraControls & {
 export interface PickHit {
   localId: number;
   itemId: number;
+  /** Viewport CSS pixels of the tap — for contextual UI anchored to the pick. */
+  clientX?: number;
+  clientY?: number;
 }
 
 /** Saved before מצב בדיקה so camera + orthographic מבט restore exactly after exit. */
@@ -2116,13 +2119,18 @@ export class ViewerEngine {
         ((useX - rect.left) / rect.width) * 2 - 1,
         -((useY - rect.top) / rect.height) * 2 + 1,
       );
-      let hit: { localId: number; itemId: number } | null = null;
+      let hit: PickHit | null = null;
       try {
         const pickers = this.components.get(OBC.FastModelPickers);
         const picker = pickers.get(this.world);
         const full = await picker.getFullPick(mouse);
         if (full && typeof full.localId === "number") {
-          hit = { localId: full.localId, itemId: full.itemId };
+          hit = {
+            localId: full.localId,
+            itemId: full.itemId,
+            clientX: useX,
+            clientY: useY,
+          };
           this.pickOrbitPivotWorld.copy(full.point);
           this.pickOrbitPivotActive = true;
           const c = this.world.camera.controls;

@@ -40,6 +40,10 @@ import {
   DrawingMarkupLayer,
   type DrawingMarkupLayerHandle,
 } from "@/components/viewer/DrawingMarkupLayer";
+import {
+  ElementPickContextPanel,
+  type ElementPickContextPanelState,
+} from "@/components/viewer/ElementPickContextPanel";
 import { ViewerSnapshotToasts } from "@/components/viewer/ViewerSnapshotToasts";
 import { InspectionModeToolbar } from "@/components/viewer/InspectionModeToolbar";
 import { InspectionPanel } from "@/components/viewer/InspectionPanel";
@@ -93,6 +97,9 @@ export default function ViewerPage() {
   const markupLayerRef = useRef<DrawingMarkupLayerHandle>(null);
   const [snapshotCopyToast, setSnapshotCopyToast] = useState(false);
   const [snapshotSessionOpen, setSnapshotSessionOpen] = useState(false);
+  const [elementContextPanel, setElementContextPanel] = useState<ElementPickContextPanelState | null>(
+    null,
+  );
   const [snapshotCapturePending, setSnapshotCapturePending] = useState(false);
   const snapshotBlobRef = useRef<Blob | null>(null);
   const snapshotCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -232,6 +239,7 @@ export default function ViewerPage() {
   const toggleMeasurementTool = useCallback(() => {
     if (viewerTool !== "measurement") {
       setMarkupDrawingEnabled(false);
+      setElementContextPanel(null);
       if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
         useMultiSelectStore.getState().exitMultiSelectSession();
         void engine?.highlightFragmentLocalSet(new Set());
@@ -708,14 +716,25 @@ export default function ViewerPage() {
     useMultiSelectStore.getState().exitMultiSelectSession();
   }, [restoreFullModelIsolationState]);
 
-  const handleEnterMultiSelect = useCallback(() => {
-    if (!engine || viewerTool === "measurement" || isolationMode !== "none") return;
+  const handleEnterMultiSelect = useCallback(async () => {
+    if (!engine || viewerTool === "measurement") return;
+
+    setElementContextPanel(null);
+    if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
+      await restoreFullModelIsolationState();
+      useMultiSelectStore.getState().exitMultiSelectSession();
+      void engine.highlightFragmentLocalSet(new Set());
+      setSelectionStatus("מצב בחירה רגיל");
+      return;
+    }
+
+    if (isolationMode !== "none") return;
     setMarkupDrawingEnabled(false);
     useMultiSelectStore.getState().clearSelected();
     useMultiSelectStore.getState().enterMultiSelect();
     void engine.highlightFragmentLocalSet(new Set());
     setSelectionStatus("בחירה מרובה: לחץ על אלמנטים במודל");
-  }, [engine, viewerTool, isolationMode]);
+  }, [engine, viewerTool, isolationMode, restoreFullModelIsolationState]);
 
   const handleMultiIsolate = useCallback(async () => {
     if (!engine) return;
@@ -761,9 +780,60 @@ export default function ViewerPage() {
     setSelectionStatus("מצב בחירה רגיל");
   }, [engine, restoreFullModelIsolationState]);
 
+  const handleElementPanelIsolate = useCallback(
+    async (panel: ElementPickContextPanelState) => {
+      if (!engine) return;
+      const idArr = panel.isolationLocalIds;
+      if (idArr.length === 0) return;
+      const ok = await engine.applyIsolation("isolated", new Set(idArr), {
+        ...isolationApplyOpts,
+        focus: false,
+      });
+      if (ok) useIsolationStore.getState().setIsolation("isolated", idArr);
+      setElementContextPanel(null);
+    },
+    [engine, isolationApplyOpts],
+  );
+
+  const handleElementPanelContext = useCallback(
+    async (panel: ElementPickContextPanelState) => {
+      if (!engine) return;
+      const idArr = panel.isolationLocalIds;
+      if (idArr.length === 0) return;
+      const ok = await engine.applyIsolation("context", new Set(idArr), {
+        ...isolationApplyOpts,
+        focus: false,
+      });
+      if (ok) useIsolationStore.getState().setIsolation("context", idArr);
+      setElementContextPanel(null);
+    },
+    [engine, isolationApplyOpts],
+  );
+
+  const handleElementPanelHide = useCallback(
+    async (panel: ElementPickContextPanelState) => {
+      if (!engine) return;
+      const idArr = panel.isolationLocalIds;
+      if (idArr.length === 0) return;
+      const ok = await engine.applyIsolation("hidden", new Set(idArr), {
+        ...isolationApplyOpts,
+        focus: false,
+      });
+      if (ok) useIsolationStore.getState().setIsolation("hidden", idArr);
+      setElementContextPanel(null);
+    },
+    [engine, isolationApplyOpts],
+  );
+
+  const handleElementPanelInspect = useCallback(async () => {
+    setElementContextPanel(null);
+    await handleEnterPartInspection();
+  }, [handleEnterPartInspection]);
+
   const selectAssembly = useCallback(
     async (assembly: AnalyzerAssembly | null, opts?: { focusCamera?: boolean }) => {
       useMultiSelectStore.getState().exitMultiSelectSession();
+      setElementContextPanel(null);
       const focusCamera = opts?.focusCamera !== false;
       setProfileGroupDetail(null);
       setAssemblyStructureNotice(false);
@@ -799,6 +869,7 @@ export default function ViewerPage() {
   const selectAggregatedAssemblyRow = useCallback(
     async (row: AggregatedAssemblyRow) => {
       useMultiSelectStore.getState().exitMultiSelectSession();
+      setElementContextPanel(null);
       setProfileGroupDetail(null);
       setAssemblyDetailOverride(null);
       setAssemblyStructureNotice(false);
@@ -831,6 +902,7 @@ export default function ViewerPage() {
   const selectProfileGroupRow = useCallback(
     async (row: AggregatedProfileTabRow) => {
       useMultiSelectStore.getState().exitMultiSelectSession();
+      setElementContextPanel(null);
       setProfileGroupDetail({
         profileLabel: row.profileLabel,
         instances: row.instances,
@@ -855,6 +927,7 @@ export default function ViewerPage() {
       opts?: { preserveProfileGroup?: boolean; focusCamera?: boolean },
     ) => {
       useMultiSelectStore.getState().exitMultiSelectSession();
+      setElementContextPanel(null);
       const focusCamera = opts?.focusCamera !== false;
       if (part !== null && !opts?.preserveProfileGroup) {
         setProfileGroupDetail(null);
@@ -884,6 +957,7 @@ export default function ViewerPage() {
   const selectPartInstances = useCallback(
     async (instances: AnalyzerPart[]) => {
       useMultiSelectStore.getState().exitMultiSelectSession();
+      setElementContextPanel(null);
       setProfileGroupDetail(null);
       setAssemblyDetailOverride(null);
       setAssemblyStructureNotice(false);
@@ -905,6 +979,7 @@ export default function ViewerPage() {
   );
 
   const clearViewerSelection = useCallback(async () => {
+    setElementContextPanel(null);
     setAssemblyStructureNotice(false);
     useMultiSelectStore.getState().exitMultiSelectSession();
     setAssemblyDetailOverride(null);
@@ -969,6 +1044,7 @@ export default function ViewerPage() {
       const guidIdx = engine.getAnalyzerGuidIndex();
 
       if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
+        setElementContextPanel(null);
         const toggleAndHighlight = async (targetIds: number[]) => {
           const uniq = [...new Set(targetIds)].filter(
             (n) => typeof n === "number" && Number.isFinite(n),
@@ -1037,6 +1113,8 @@ export default function ViewerPage() {
         return;
       }
 
+      setElementContextPanel(null);
+
       if (!analyzerData) {
         if (highlightIds.length) await engine.highlightItemIds(highlightIds);
         setSelectionStatus(
@@ -1073,6 +1151,15 @@ export default function ViewerPage() {
         const assembly = choosePreferredAssemblyForModelPick(candidates);
         if (assembly) {
           await selectAssembly(assembly, { focusCamera: false });
+          if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
+            const set = await engine.resolveIsolationLocalIds(analyzerRefsFromAssembly(assembly));
+            setElementContextPanel({
+              clientX: hit.clientX,
+              clientY: hit.clientY,
+              isolationLocalIds: [...set],
+              showInspect: false,
+            });
+          }
           return;
         }
       }
@@ -1090,6 +1177,23 @@ export default function ViewerPage() {
       }
 
       await selectPart(part, { focusCamera: false });
+      if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
+        const ids = await engine.resolveIsolationLocalIds([
+          { id: part.id, expressId: part.expressId },
+        ]);
+        const showInspect =
+          loadingState === "ready" &&
+          !useInspectionStore.getState().active &&
+          !isAnalyzerBoltRow(part) &&
+          !!part.id &&
+          useIsolationStore.getState().isolationMode === "none";
+        setElementContextPanel({
+          clientX: hit.clientX,
+          clientY: hit.clientY,
+          isolationLocalIds: [...ids],
+          showInspect,
+        });
+      }
     });
     return () => engine.setPickCallback(null);
   }, [
@@ -1101,12 +1205,14 @@ export default function ViewerPage() {
     selectPart,
     setActiveSheet,
     clearViewerSelection,
+    loadingState,
   ]);
 
   const handleMarkupDrawingToggle = useCallback(() => {
     setMarkupDrawingEnabled((prev) => {
       const next = !prev;
       if (next) {
+        setElementContextPanel(null);
         if (viewerTool === "measurement") {
           setViewerTool("none");
         }
@@ -1156,6 +1262,7 @@ export default function ViewerPage() {
   const startSnapshotSession = useCallback(async () => {
     if (!engine || loadingState !== "ready" || viewerTool === "measurement") return;
     if (snapshotSessionOpen || snapshotCapturePending) return;
+    setElementContextPanel(null);
     const webgl = engine.getViewCanvas();
     if (!webgl) return;
 
@@ -1304,11 +1411,27 @@ export default function ViewerPage() {
           !selectedAssembly &&
           !profileGroupDetail &&
           isolationMode === "none" &&
-          pickInteractionMode !== "multi"
+          pickInteractionMode !== "multi" &&
+          !elementContextPanel
         }
         disabled={!engine}
         onInspect={() => void handleEnterPartInspection()}
       />
+
+      {!inspectionActive &&
+        elementContextPanel &&
+        !snapshotSessionOpen &&
+        viewerTool !== "measurement" &&
+        pickInteractionMode !== "multi" &&
+        !markupDrawingEnabled && (
+          <ElementPickContextPanel
+            state={elementContextPanel}
+            onIsolate={() => void handleElementPanelIsolate(elementContextPanel)}
+            onContext={() => void handleElementPanelContext(elementContextPanel)}
+            onHide={() => void handleElementPanelHide(elementContextPanel)}
+            onInspect={() => void handleElementPanelInspect()}
+          />
+        )}
 
       {inspectionActive && inspectionPartResolved && analyzerData && (
         <InspectionPanel
