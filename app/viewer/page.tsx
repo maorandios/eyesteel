@@ -92,9 +92,10 @@ export default function ViewerPage() {
   const [drawingClearSignal, setDrawingClearSignal] = useState(0);
   const markupLayerRef = useRef<DrawingMarkupLayerHandle>(null);
   const [snapshotCopyToast, setSnapshotCopyToast] = useState(false);
-  const [snapshotDownloadUrl, setSnapshotDownloadUrl] = useState<string | null>(null);
+  const [snapshotSessionOpen, setSnapshotSessionOpen] = useState(false);
+  const [snapshotCapturePending, setSnapshotCapturePending] = useState(false);
+  const snapshotBlobRef = useRef<Blob | null>(null);
   const snapshotCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const snapshotDownloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const {
     file,
     analyzerData,
@@ -720,7 +721,7 @@ export default function ViewerPage() {
     if (!engine) return;
     const ids = useMultiSelectStore.getState().selectedLocalIds;
     if (ids.length === 0) return;
-    const ok = await engine.applyIsolation("isolated", new Set(ids), { focus: true });
+    const ok = await engine.applyIsolation("isolated", new Set(ids), { focus: false });
     if (ok) {
       useIsolationStore.getState().setIsolation("isolated", ids);
     }
@@ -730,7 +731,7 @@ export default function ViewerPage() {
     if (!engine) return;
     const ids = useMultiSelectStore.getState().selectedLocalIds;
     if (ids.length === 0) return;
-    const ok = await engine.applyIsolation("context", new Set(ids), { focus: true });
+    const ok = await engine.applyIsolation("context", new Set(ids), { focus: false });
     if (ok) {
       useIsolationStore.getState().setIsolation("context", ids);
     }
@@ -740,7 +741,7 @@ export default function ViewerPage() {
     if (!engine) return;
     const ids = useMultiSelectStore.getState().selectedLocalIds;
     if (ids.length === 0) return;
-    const ok = await engine.applyIsolation("hidden", new Set(ids), { focus: true });
+    const ok = await engine.applyIsolation("hidden", new Set(ids), { focus: false });
     if (ok) {
       useIsolationStore.getState().setIsolation("hidden", ids);
     }
@@ -1127,84 +1128,92 @@ export default function ViewerPage() {
       clearTimeout(snapshotCopyTimerRef.current);
       snapshotCopyTimerRef.current = null;
     }
-    if (snapshotDownloadTimerRef.current) {
-      clearTimeout(snapshotDownloadTimerRef.current);
-      snapshotDownloadTimerRef.current = null;
-    }
   }, []);
 
-  const snapshotDownloadUrlCleanupRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    snapshotDownloadUrlCleanupRef.current = snapshotDownloadUrl;
-  }, [snapshotDownloadUrl]);
+  const closeSnapshotSession = useCallback(() => {
+    clearSnapshotTimers();
+    setSnapshotCopyToast(false);
+    snapshotBlobRef.current = null;
+    setSnapshotSessionOpen(false);
+    setSnapshotCapturePending(false);
+  }, [clearSnapshotTimers]);
 
   useEffect(() => {
     return () => {
       clearSnapshotTimers();
-      const u = snapshotDownloadUrlCleanupRef.current;
-      if (u) URL.revokeObjectURL(u);
-      snapshotDownloadUrlCleanupRef.current = null;
     };
   }, [clearSnapshotTimers]);
 
-  const handleSnapshotDownload = useCallback(() => {
-    setSnapshotDownloadUrl((url) => {
-      if (!url) return null;
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `eyesteel-view-${Date.now()}.png`;
-      a.rel = "noopener";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      return null;
-    });
-    clearSnapshotTimers();
-    setSnapshotCopyToast(false);
-  }, [clearSnapshotTimers]);
+  useEffect(() => {
+    if (!snapshotSessionOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeSnapshotSession();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [snapshotSessionOpen, closeSnapshotSession]);
 
-  const handleViewSnapshot = useCallback(async () => {
-    if (!engine || loadingState !== "ready") return;
+  const startSnapshotSession = useCallback(async () => {
+    if (!engine || loadingState !== "ready" || viewerTool === "measurement") return;
+    if (snapshotSessionOpen || snapshotCapturePending) return;
     const webgl = engine.getViewCanvas();
     if (!webgl) return;
 
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    setSnapshotCapturePending(true);
+    try {
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
-    const markupCanvas = markupLayerRef.current?.getMarkupCanvas() ?? null;
-    const blob = await compositeViewerSnapshotPngBlob(webgl, markupCanvas);
+      const markupCanvas = markupLayerRef.current?.getMarkupCanvas() ?? null;
+      const blob = await compositeViewerSnapshotPngBlob(webgl, markupCanvas);
+      if (!blob) return;
+
+      clearSnapshotTimers();
+      snapshotBlobRef.current = blob;
+      setSnapshotSessionOpen(true);
+    } finally {
+      setSnapshotCapturePending(false);
+    }
+  }, [
+    engine,
+    loadingState,
+    viewerTool,
+    snapshotSessionOpen,
+    snapshotCapturePending,
+    clearSnapshotTimers,
+  ]);
+
+  const handleSnapshotCopyFromSession = useCallback(async () => {
+    const blob = snapshotBlobRef.current;
     if (!blob) return;
-
     clearSnapshotTimers();
-
-    const copied = await copyImageBlobToClipboard(blob);
-
-    setSnapshotDownloadUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return URL.createObjectURL(blob);
-    });
-
-    if (copied) {
+    const ok = await copyImageBlobToClipboard(blob);
+    snapshotBlobRef.current = null;
+    setSnapshotSessionOpen(false);
+    setSnapshotCapturePending(false);
+    if (ok) {
       setSnapshotCopyToast(true);
       snapshotCopyTimerRef.current = setTimeout(() => {
         snapshotCopyTimerRef.current = null;
         setSnapshotCopyToast(false);
-      }, 4500);
-    } else {
-      setSnapshotCopyToast(false);
+      }, 2500);
     }
+  }, [clearSnapshotTimers]);
 
-    snapshotDownloadTimerRef.current = setTimeout(() => {
-      snapshotDownloadTimerRef.current = null;
-      setSnapshotDownloadUrl((u) => {
-        if (u) URL.revokeObjectURL(u);
-        return null;
-      });
-      setSnapshotCopyToast(false);
-    }, 60_000);
-  }, [engine, loadingState, clearSnapshotTimers]);
+  const handleSnapshotDownloadFromSession = useCallback(() => {
+    const blob = snapshotBlobRef.current;
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `eyesteel-view-${Date.now()}.png`;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    closeSnapshotSession();
+  }, [closeSnapshotSession]);
 
   const handleDockSelectionMode = useCallback((m: SelectionMode) => {
     setSelectionMode(m);
@@ -1234,11 +1243,16 @@ export default function ViewerPage() {
         />
       )}
 
-      <ViewerSnapshotToasts
-        copyToastVisible={snapshotCopyToast}
-        downloadUrl={snapshotDownloadUrl}
-        onDownload={handleSnapshotDownload}
-      />
+      {snapshotSessionOpen ? (
+        <div
+          className="pointer-events-auto fixed inset-0 z-[45] bg-zinc-950/45 backdrop-blur-[0.5px]"
+          aria-modal="true"
+          role="dialog"
+          aria-label="מצב צילום מסך — בחר העתקה, הורדה או סגירה בתפריט התחתון"
+        />
+      ) : null}
+
+      <ViewerSnapshotToasts copyToastVisible={snapshotCopyToast} />
       <div className="pointer-events-auto absolute left-3 top-3 z-40 safe-top">
         <Button variant="secondary" size="lg" className="shadow-lg" onClick={() => router.push("/")}>
           {he.backToUpload}
@@ -1334,7 +1348,26 @@ export default function ViewerPage() {
         onGlobalSearch={
           loadingState === "ready" && analyzerData ? () => setGlobalSearchOpen(true) : undefined
         }
-        onSnapshot={loadingState === "ready" ? () => void handleViewSnapshot() : undefined}
+        onSnapshot={
+          loadingState === "ready" && !inspectionActive
+            ? () => void startSnapshotSession()
+            : undefined
+        }
+        snapshotSessionOpen={snapshotSessionOpen}
+        snapshotCapturePending={snapshotCapturePending}
+        onSnapshotCopy={
+          loadingState === "ready" && !inspectionActive
+            ? () => void handleSnapshotCopyFromSession()
+            : undefined
+        }
+        onSnapshotDownload={
+          loadingState === "ready" && !inspectionActive
+            ? handleSnapshotDownloadFromSession
+            : undefined
+        }
+        onSnapshotDismiss={
+          loadingState === "ready" && !inspectionActive ? closeSnapshotSession : undefined
+        }
         onResetView={loadingState === "ready" ? handleResetView : undefined}
         measurementActive={viewerTool === "measurement"}
         onMeasurementToggle={toggleMeasurementTool}

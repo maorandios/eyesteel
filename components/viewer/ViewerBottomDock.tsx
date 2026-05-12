@@ -31,6 +31,8 @@ import {
   Bolt,
   Camera,
   CircleX,
+  ImageDown,
+  Images,
   FoldHorizontal,
   Frame,
   Funnel,
@@ -171,7 +173,13 @@ interface Props {
   markupDrawingDisabled?: boolean;
   onMarkupDrawingToggle?: () => void;
   onMarkupDrawingClear?: () => void;
+  /** Starts capture; when {@link snapshotSessionOpen} the main tile is inactive until the session ends. */
   onSnapshot?: () => void;
+  snapshotSessionOpen?: boolean;
+  snapshotCapturePending?: boolean;
+  onSnapshotCopy?: () => void;
+  onSnapshotDownload?: () => void;
+  onSnapshotDismiss?: () => void;
   /** איזומטריה ראשונית כמו בטעינת הקובץ */
   onResetView?: () => void;
 }
@@ -215,6 +223,11 @@ export function ViewerBottomDock({
   onMarkupDrawingToggle,
   onMarkupDrawingClear,
   onSnapshot,
+  snapshotSessionOpen = false,
+  snapshotCapturePending = false,
+  onSnapshotCopy,
+  onSnapshotDownload,
+  onSnapshotDismiss,
   onResetView,
 }: Props) {
   const [elementOpen, setElementOpen] = useState(false);
@@ -437,6 +450,55 @@ export function ViewerBottomDock({
               aria-label="סגור מצב סימון"
               title="יציאה מסימון"
               onClick={onMarkupDrawingToggle}
+              className={cn(
+                "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
+                "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
+                "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+              )}
+            >
+              <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">
+                <CircleX className="size-[1.05rem] shrink-0 sm:size-[1.15rem]" aria-hidden />
+              </span>
+            </Button>
+          </DockSubmenuBar>
+        </div>
+      ) : null}
+      {snapshotSessionOpen &&
+      onSnapshotCopy &&
+      onSnapshotDownload &&
+      onSnapshotDismiss ? (
+        <div
+          className="pointer-events-auto flex w-full shrink-0 justify-center"
+          role="region"
+          aria-label="צילום מסך"
+        >
+          <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
+            <DockSubmenuPill
+              label="העתקה"
+              labelClassName="max-w-[3.5rem] text-zinc-100 sm:max-w-[3.75rem]"
+              title="העתקת התמונה ללוח"
+              aria-label="העתקה"
+              className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
+              onClick={() => onSnapshotCopy()}
+            >
+              <Images aria-hidden />
+            </DockSubmenuPill>
+            <DockSubmenuPill
+              label="הורדה"
+              labelClassName="max-w-[3.5rem] text-zinc-100 sm:max-w-[3.75rem]"
+              title="הורדת קובץ PNG"
+              aria-label="הורדה"
+              className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
+              onClick={() => onSnapshotDownload()}
+            >
+              <ImageDown aria-hidden />
+            </DockSubmenuPill>
+            <Button
+              type="button"
+              variant="ghost"
+              aria-label="סגור צילום מסך"
+              title="סגור בלי שמירה"
+              onClick={() => onSnapshotDismiss()}
               className={cn(
                 "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
                 "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
@@ -697,8 +759,16 @@ export function ViewerBottomDock({
         {onSnapshot && (
           <DockPillButton
             label="צילום מסך"
-            title="צילום התצוגה (ללא תפריטים)"
+            aria-pressed={snapshotSessionOpen}
+            submenuOpen={snapshotSessionOpen}
+            labelClassName={snapshotSessionOpen ? "text-zinc-100" : undefined}
+            title={
+              snapshotSessionOpen
+                ? "בחר העתקה, הורדה או סגירה בתפריט למעלה"
+                : "צילום התצוגה (ללא תפריטים)"
+            }
             aria-label="צילום מסך"
+            disabled={snapshotSessionOpen || snapshotCapturePending}
             onClick={() => onSnapshot()}
           >
             <Camera aria-hidden />

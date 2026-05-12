@@ -121,6 +121,15 @@ const INSPECTION_ORTHO_MARGIN = 1.12;
 /** Sketch + isolated would otherwise use lodOpacity 0 with edges-only — thin plates can vanish if edge geometry is empty. */
 const INSPECTION_SKETCH_LOD_FACE_OPACITY = 0.34;
 const ORTHO_DISTANCE_K = 1.75;
+/** Top toolbar / mode strip (px) — ortho מבט centers in the band below this and above the dock. */
+const VIEWER_TOP_CHROME_PX = 80;
+/** Bottom floating dock + gap (px). */
+const VIEWER_BOTTOM_DOCK_RESERVE_PX = 176;
+/**
+ * Extra zoom‑out on top of {@link ORTHO_MARGIN} for docked מבט / section ortho so the full face has
+ * clear margin inside the visible viewport (not edge‑clipped).
+ */
+const ORTHO_VIEW_DOCK_EXTRA_MARGIN = 1.14;
 
 /** Worker batch size for `setVisible` / `setOpacity` on large Tekla models (mobile-safe). */
 const ISOLATION_WORKER_CHUNK = 384;
@@ -479,14 +488,41 @@ export class ViewerEngine {
     if (fragments.initialized) void fragments.core.update(true);
   }
 
-  private updateOrthoFrustum(box: THREE.Box3) {
+  /**
+   * After orthographic frustum + look-at, nudge the camera so the orbit target aligns with the
+   * **visible** viewport midline (canvas minus top toolbar and bottom dock), not the raw canvas center.
+   * Uses {@link CameraControls#setFocalOffset} with the same scale as orthographic screen-pan (pedestal).
+   */
+  private applyBottomDockOrthoFocalCompensation(): void {
+    if (this.disposed || this.activeOrthoViewMode === null) return;
+    const ctrl = this.world.camera.controls as CameraControls | undefined;
+    const ortho = this.world.camera.three;
+    if (!ctrl || !(ortho instanceof THREE.OrthographicCamera)) return;
+    const renderer = this.world.renderer as OBF.RendererWith2D;
+    const el = renderer.container;
+    const h = el.clientHeight;
+    if (!(h > 0)) return;
+    const vSpan = (ortho.top - ortho.bottom) / ortho.zoom;
+    /** Canvas midline → midline of [top chrome … h − bottom dock] (see camera-controls ortho `pedestalY`). */
+    const shiftPx = (VIEWER_BOTTOM_DOCK_RESERVE_PX - VIEWER_TOP_CHROME_PX) * 0.5;
+    const focalY = (shiftPx * vSpan) / h;
+    void ctrl.setFocalOffset(0, focalY, 0, false);
+    void ctrl.update(0);
+  }
+
+  private updateOrthoFrustum(box: THREE.Box3, dockChromeFitting = false) {
     const renderer = this.world.renderer as OBF.RendererWith2D;
     const el = renderer.container;
     const w = el.clientWidth;
     const h = el.clientHeight;
-    const aspect = w > 0 && h > 0 ? w / h : 1;
-    const marginFactor =
-      this.inspectionSessionFramingBox !== null ? INSPECTION_ORTHO_MARGIN : ORTHO_MARGIN;
+    const topPad = dockChromeFitting ? VIEWER_TOP_CHROME_PX : 0;
+    const bottomPad = dockChromeFitting ? VIEWER_BOTTOM_DOCK_RESERVE_PX : 0;
+    const hEff = Math.max(h - topPad - bottomPad, 1);
+    const aspect = w > 0 && h > 0 ? w / hEff : 1;
+    let marginFactor = this.inspectionSessionFramingBox !== null ? INSPECTION_ORTHO_MARGIN : ORTHO_MARGIN;
+    if (dockChromeFitting && this.inspectionSessionFramingBox === null) {
+      marginFactor *= ORTHO_VIEW_DOCK_EXTRA_MARGIN;
+    }
     this.updateOrthoFrustumForAspect(box, aspect, marginFactor);
   }
 
@@ -568,8 +604,9 @@ export class ViewerEngine {
       if (this.inspectionSessionFramingBox !== null && this.activeOrthoViewMode !== null) {
         this.updateOrthoFrustumForInspectionSnapshot(box);
       } else {
-        this.updateOrthoFrustum(box);
+        this.updateOrthoFrustum(box, true);
       }
+      this.applyBottomDockOrthoFocalCompensation();
     };
     renderer.onResize.add(this.orthoResizeHandler);
   }
@@ -629,7 +666,7 @@ export class ViewerEngine {
     const span = Math.max(size.x, size.y, size.z, 1);
     const distance = ORTHO_DISTANCE_K * span;
 
-    this.updateOrthoFrustum(box);
+    this.updateOrthoFrustum(box, true);
 
     const simpleCam = this.world.camera as OBC.SimpleCamera;
     const ctrl = simpleCam.controls;
@@ -649,11 +686,15 @@ export class ViewerEngine {
     ctrl?.setOrbitPoint(center.x, center.y, center.z);
     ctrl?.updateCameraUp();
     ctrl?.setLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, false);
+    ctrl?.setFocalOffset(0, 0, 0, false);
+    void ctrl?.update(0);
+
+    this.activeOrthoViewMode = mode;
+    this.applyBottomDockOrthoFocalCompensation();
 
     this.boundUseCamera?.(ortho);
     this.syncFragmentsAfterCameraSwap();
 
-    this.activeOrthoViewMode = mode;
     this.attachOrthoResizeListener();
     this.applySnappyCameraControls();
     return true;
@@ -675,7 +716,7 @@ export class ViewerEngine {
     const span = Math.max(size.x, size.y, size.z, 1);
     const distance = ORTHO_DISTANCE_K * span;
 
-    this.updateOrthoFrustum(box);
+    this.updateOrthoFrustum(box, true);
 
     const mode = this.userClipDirection;
     const simpleCam = this.world.camera as OBC.SimpleCamera;
@@ -700,11 +741,15 @@ export class ViewerEngine {
     ctrl?.setOrbitPoint(target.x, target.y, target.z);
     ctrl?.updateCameraUp();
     ctrl?.setLookAt(eye.x, eye.y, eye.z, target.x, target.y, target.z, false);
+    ctrl?.setFocalOffset(0, 0, 0, false);
+    void ctrl?.update(0);
+
+    this.activeOrthoViewMode = mode;
+    this.applyBottomDockOrthoFocalCompensation();
 
     this.boundUseCamera?.(ortho);
     this.syncFragmentsAfterCameraSwap();
 
-    this.activeOrthoViewMode = mode;
     this.attachOrthoResizeListener();
     this.applySnappyCameraControls();
     return true;
@@ -904,6 +949,8 @@ export class ViewerEngine {
 
     this.updateOrthoFrustumForInspectionSnapshot(box);
 
+    this.applyBottomDockOrthoFocalCompensation();
+
     this.boundUseCamera?.(ortho);
     void this.syncFragmentsAfterCameraSwap();
 
@@ -926,6 +973,7 @@ export class ViewerEngine {
       ctrl.camera = this.perspectiveCamera;
       this.applyPerspectiveNavigationBindings(ctrl);
       this.resetPerspectiveZoomForControls(ctrl);
+      ctrl.setFocalOffset(0, 0, 0, false);
     }
 
     this.perspectiveCamera.up.set(0, 1, 0);
