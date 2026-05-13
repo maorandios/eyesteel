@@ -10,7 +10,6 @@ import {
 } from "@/lib/viewer/view-mode-presets";
 import {
   DockSubmenuBar,
-  DockSubmenuDotSep,
   DockSubmenuPill,
 } from "@/components/viewer/dock-submenu";
 import { ClippingHudRow } from "@/components/viewer/ClippingHudRow";
@@ -63,9 +62,9 @@ export type ElementIsolationHudProps = {
 };
 
 const dockLabelClass =
-  "max-w-[3.625rem] text-center text-[9px] font-medium leading-tight tracking-tight text-zinc-400 sm:max-w-[4.375rem] sm:text-[11px]";
+  "max-w-[3.625rem] text-center text-[9px] font-medium leading-tight tracking-tight text-zinc-600 sm:max-w-[4.375rem] sm:text-[11px]";
 
-const dockMainIconActive = "[&_svg]:text-[#009DFF]";
+const dockMainIconActive = "[&_svg]:!text-[#003CFF]";
 
 /** Ghost tile: icon + Hebrew label, no outline (outer menu pill provides chrome). */
 function DockPillButton({
@@ -87,9 +86,9 @@ function DockPillButton({
       variant="ghost"
       size="default"
       className={cn(
-        "h-auto min-h-0 w-[3.875rem] shrink-0 flex-col gap-1 rounded-full border-0 bg-transparent px-0.5 py-1.5 font-normal tracking-normal text-zinc-100 shadow-none ring-0 outline-none outline-offset-0 sm:w-[4.5rem] sm:gap-1 sm:px-1 sm:py-2",
-        "hover:bg-zinc-800/35 hover:outline-none active:scale-[0.99] disabled:pointer-events-none disabled:opacity-40 [&_svg]:shrink-0",
-        "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950",
+        "h-auto min-h-0 w-[3.875rem] shrink-0 flex-col gap-1 rounded-full border-0 bg-transparent px-0.5 py-1.5 font-normal tracking-normal text-zinc-700 shadow-none ring-0 outline-none outline-offset-0 sm:w-[4.5rem] sm:gap-1 sm:px-1 sm:py-2",
+        "hover:bg-zinc-200/80 hover:text-zinc-950 hover:outline-none active:scale-[0.99] disabled:pointer-events-none disabled:opacity-40 [&_svg]:shrink-0 [&_svg]:text-zinc-700",
+        "focus-visible:ring-2 focus-visible:ring-zinc-400/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#e8ecef]",
         className,
       )}
       {...props}
@@ -290,7 +289,7 @@ export function ViewerBottomDock({
   return (
     <div
       ref={wrapRef}
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-50 flex flex-col items-center gap-5 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-50 flex flex-col items-center gap-5 pb-[env(safe-area-inset-bottom)]"
     >
       {appliedViewMode && onExitAppliedView && !viewOpen && (
         <div className="pointer-events-auto shrink-0">
@@ -303,8 +302,8 @@ export function ViewerBottomDock({
               onClick={onExitAppliedView}
               className={cn(
                 "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
-                "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
-                "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+                "text-zinc-700 hover:bg-zinc-200/80 hover:text-zinc-950 active:scale-[0.99]",
+                "focus-visible:ring-2 focus-visible:ring-zinc-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-[#e8ecef]",
               )}
             >
               <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">
@@ -414,7 +413,7 @@ export function ViewerBottomDock({
           <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
             <DockSubmenuPill
               label="בידוד חלק"
-              labelClassName="max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]"
+              labelClassName="max-w-[4.75rem] text-zinc-700 sm:max-w-[5.85rem]"
               title="בודד את האלמנט הנבחר"
               aria-label="בידוד חלק"
               selected={elementIsolationHud.isolationMode === "isolated"}
@@ -426,7 +425,7 @@ export function ViewerBottomDock({
             </DockSubmenuPill>
             <DockSubmenuPill
               label="הצג בשקיפות"
-              labelClassName="max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]"
+              labelClassName="max-w-[4.75rem] text-zinc-700 sm:max-w-[5.85rem]"
               title="הצג את האלמנט בהקשר שקוף"
               aria-label="הצג בשקיפות"
               selected={elementIsolationHud.isolationMode === "context"}
@@ -438,7 +437,7 @@ export function ViewerBottomDock({
             </DockSubmenuPill>
             <DockSubmenuPill
               label="הסתרה"
-              labelClassName="max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]"
+              labelClassName="max-w-[4.75rem] text-zinc-700 sm:max-w-[5.85rem]"
               title="הסתר את האלמנט הנבחר"
               aria-label="הסתרה"
               selected={elementIsolationHud.isolationMode === "hidden"}
@@ -450,7 +449,7 @@ export function ViewerBottomDock({
             </DockSubmenuPill>
             <DockSubmenuPill
               label="הצג הכל"
-              labelClassName="max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]"
+              labelClassName="max-w-[4.75rem] text-zinc-700 sm:max-w-[5.85rem]"
               title="הצג את כל המודל"
               aria-label="הצג הכל"
               className="min-w-[3.25rem] shrink-0 sm:min-w-[3.65rem]"
@@ -471,7 +470,7 @@ export function ViewerBottomDock({
           <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
             <DockSubmenuPill
               label="איפוס"
-              labelClassName="max-w-[3.5rem] text-zinc-100 sm:max-w-[3.75rem]"
+              labelClassName="max-w-[3.5rem] text-zinc-700 sm:max-w-[3.75rem]"
               title="נקה את כל המדידות"
               aria-label="איפוס מדידות"
               className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
@@ -487,8 +486,8 @@ export function ViewerBottomDock({
               onClick={onMeasurementFinish}
               className={cn(
                 "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
-                "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
-                "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+                "text-zinc-700 hover:bg-zinc-200/80 hover:text-zinc-950 active:scale-[0.99]",
+                "focus-visible:ring-2 focus-visible:ring-zinc-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-[#e8ecef]",
               )}
             >
               <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">
@@ -508,7 +507,7 @@ export function ViewerBottomDock({
             {onMarkupDrawingClear ? (
               <DockSubmenuPill
                 label="איפוס"
-                labelClassName="max-w-[3.5rem] text-zinc-100 sm:max-w-[3.75rem]"
+                labelClassName="max-w-[3.5rem] text-zinc-700 sm:max-w-[3.75rem]"
                 title="נקה ציור מהמסך"
                 aria-label="איפוס סימון"
                 className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
@@ -525,8 +524,8 @@ export function ViewerBottomDock({
               onClick={onMarkupDrawingToggle}
               className={cn(
                 "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
-                "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
-                "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+                "text-zinc-700 hover:bg-zinc-200/80 hover:text-zinc-950 active:scale-[0.99]",
+                "focus-visible:ring-2 focus-visible:ring-zinc-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-[#e8ecef]",
               )}
             >
               <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">
@@ -548,7 +547,7 @@ export function ViewerBottomDock({
           <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
             <DockSubmenuPill
               label="העתקה"
-              labelClassName="max-w-[3.5rem] text-zinc-100 sm:max-w-[3.75rem]"
+              labelClassName="max-w-[3.5rem] text-zinc-700 sm:max-w-[3.75rem]"
               title="העתקת התמונה ללוח"
               aria-label="העתקה"
               className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
@@ -558,7 +557,7 @@ export function ViewerBottomDock({
             </DockSubmenuPill>
             <DockSubmenuPill
               label="הורדה"
-              labelClassName="max-w-[3.5rem] text-zinc-100 sm:max-w-[3.75rem]"
+              labelClassName="max-w-[3.5rem] text-zinc-700 sm:max-w-[3.75rem]"
               title="הורדת קובץ PNG"
               aria-label="הורדה"
               className="min-w-[3.25rem] shrink-0 sm:min-w-[3.5rem]"
@@ -574,8 +573,8 @@ export function ViewerBottomDock({
               onClick={() => onSnapshotDismiss()}
               className={cn(
                 "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2.5 py-1 font-normal shadow-none ring-0 sm:px-3 sm:py-1.5",
-                "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
-                "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+                "text-zinc-700 hover:bg-zinc-200/80 hover:text-zinc-950 active:scale-[0.99]",
+                "focus-visible:ring-2 focus-visible:ring-zinc-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-[#e8ecef]",
               )}
             >
               <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">
@@ -587,7 +586,7 @@ export function ViewerBottomDock({
       ) : null}
       <div
         className={cn(
-          "pointer-events-auto flex max-w-[min(100vw-1rem,92rem)] flex-nowrap items-center justify-center gap-x-0 overflow-visible rounded-full border border-zinc-600/90 bg-zinc-950/95 px-1 py-1.5 shadow-2xl backdrop-blur-md sm:gap-x-px sm:px-2 sm:py-2",
+          "pointer-events-auto flex w-full flex-nowrap items-center justify-center gap-x-0 overflow-visible border-t border-zinc-300/80 bg-[#e8ecef] px-1 py-1.5 shadow-[0_-10px_28px_rgba(39,39,42,0.08)] sm:gap-x-px sm:px-2 sm:py-2",
         )}
         dir="rtl"
       >
@@ -601,7 +600,7 @@ export function ViewerBottomDock({
           label="דאשבורד"
           aria-pressed={dashboardSheetOpen}
           submenuOpen={dashboardSheetOpen}
-          labelClassName={dashboardSheetOpen ? "text-zinc-100" : undefined}
+          labelClassName={dashboardSheetOpen ? "text-zinc-900" : undefined}
           title="דאשבורד — לחיצה נוספת סוגרת את הפאנל"
           aria-label="דאשבורד"
           onClick={onDashboard}
@@ -614,7 +613,7 @@ export function ViewerBottomDock({
             label="סינון"
             aria-pressed={filterSheetOpen}
             submenuOpen={filterSheetOpen}
-            labelClassName={filterSheetOpen ? "text-zinc-100" : undefined}
+            labelClassName={filterSheetOpen ? "text-zinc-900" : undefined}
             title="סינון תצוגה — לחיצה נוספת סוגרת את הפאנל"
             aria-label="סינון"
             onClick={onViewFilter}
@@ -677,7 +676,7 @@ export function ViewerBottomDock({
               : "מבט"
           }
           labelClassName={
-            activeViewMode && !viewModeDisabled ? "max-w-[5.85rem] text-zinc-100 sm:max-w-[7rem]" : undefined
+            activeViewMode && !viewModeDisabled ? "max-w-[5.85rem] text-zinc-900 sm:max-w-[7rem]" : undefined
           }
           className={
             activeViewMode && !viewModeDisabled ? "min-w-[4.125rem] w-[5rem] px-1 sm:w-[6rem] sm:min-w-[4.75rem]" : undefined
@@ -715,7 +714,7 @@ export function ViewerBottomDock({
           }
           labelClassName={
             appliedClippingDirection && !clippingDisabled
-              ? "max-w-[5.85rem] text-zinc-100 sm:max-w-[7rem]"
+              ? "max-w-[5.85rem] text-zinc-900 sm:max-w-[7rem]"
               : undefined
           }
           className={
@@ -737,7 +736,7 @@ export function ViewerBottomDock({
           <DockPillButton
             label="ברגים"
             submenuOpen={hideFastenersKeepHoles}
-            labelClassName={hideFastenersKeepHoles ? "text-zinc-100" : undefined}
+            labelClassName={hideFastenersKeepHoles ? "text-zinc-900" : undefined}
             aria-pressed={hideFastenersKeepHoles}
             title="כבוי: הצג מהדקים ובורגים. מופעל: הסתר רכיבי הידוק מהתצוגה ושמור על מיקום חריצים ופתחים"
             aria-label="ברגים"
@@ -750,7 +749,7 @@ export function ViewerBottomDock({
         <DockPillButton
           label="שרטוט"
           submenuOpen={sketchModeActive && !sketchDisabled}
-          labelClassName={sketchModeActive && !sketchDisabled ? "text-zinc-100" : undefined}
+          labelClassName={sketchModeActive && !sketchDisabled ? "text-zinc-900" : undefined}
           aria-pressed={sketchModeActive}
           disabled={sketchDisabled}
           title="מצב סקיצה ושרטוט"
@@ -780,7 +779,7 @@ export function ViewerBottomDock({
             !multiSelectEnterDisabled &&
             !measurementActive &&
             !markupDrawingActive
-              ? "text-zinc-100"
+              ? "text-zinc-900"
               : undefined
           }
           title={
@@ -805,7 +804,7 @@ export function ViewerBottomDock({
             disabled={markupDrawingDisabled}
             submenuOpen={markupDrawingActive && !markupDrawingDisabled}
             labelClassName={
-              markupDrawingActive && !markupDrawingDisabled ? "text-zinc-100" : undefined
+              markupDrawingActive && !markupDrawingDisabled ? "text-zinc-900" : undefined
             }
             title={
               markupDrawingDisabled
@@ -823,7 +822,7 @@ export function ViewerBottomDock({
           label="מדידה"
           aria-pressed={measurementActive}
           submenuOpen={measurementActive}
-          labelClassName={measurementActive ? "text-zinc-100" : undefined}
+          labelClassName={measurementActive ? "text-zinc-900" : undefined}
           title="מדידה — לחיצה על תווית המרחק מציגה גובה ומרחק אופקי במודל. איפוס ויציאה בתפריט למעלה."
           aria-label="מדידה"
           onClick={onMeasurementToggle}
@@ -836,7 +835,7 @@ export function ViewerBottomDock({
             label="צילום מסך"
             aria-pressed={snapshotSessionOpen}
             submenuOpen={snapshotSessionOpen}
-            labelClassName={snapshotSessionOpen ? "text-zinc-100" : undefined}
+            labelClassName={snapshotSessionOpen ? "text-zinc-900" : undefined}
             title={
               snapshotSessionOpen
                 ? "בחר העתקה, הורדה או סגירה בתפריט למעלה"

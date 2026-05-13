@@ -71,15 +71,15 @@ export function ClippingHudRow({
             "h-5 w-full cursor-pointer appearance-none bg-transparent",
             "[&::-webkit-slider-runnable-track]:h-1",
             "[&::-webkit-slider-runnable-track]:rounded-full",
-            "[&::-webkit-slider-runnable-track]:bg-zinc-700/95",
+            "[&::-webkit-slider-runnable-track]:bg-zinc-300/95",
             "[&::-webkit-slider-thumb]:relative [&::-webkit-slider-thumb]:top-[-4px] [&::-webkit-slider-thumb]:box-border [&::-webkit-slider-thumb]:size-3",
             "[&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-0",
-            "[&::-webkit-slider-thumb]:bg-[#009DFF] [&::-webkit-slider-thumb]:shadow [&::-webkit-slider-thumb]:outline-none",
+            "[&::-webkit-slider-thumb]:bg-[#003CFF] [&::-webkit-slider-thumb]:shadow [&::-webkit-slider-thumb]:outline-none",
             "[&::-moz-range-thumb]:box-border [&::-moz-range-thumb]:size-3",
-            "[&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-[#009DFF]",
-            "[&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-zinc-700/95",
-            "[&::-moz-range-progress]:h-1 [&::-moz-range-progress]:rounded-l-full [&::-moz-range-progress]:bg-[#009DFF]",
-            "accent-[#009DFF]",
+            "[&::-moz-range-thumb]:cursor-pointer [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-[#003CFF]",
+            "[&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full [&::-moz-range-track]:bg-zinc-300/95",
+            "[&::-moz-range-progress]:h-1 [&::-moz-range-progress]:rounded-l-full [&::-moz-range-progress]:bg-[#003CFF]",
+            "accent-[#003CFF]",
           )}
           min={snapshot.depthMin}
           max={snapshot.depthMax}
@@ -103,8 +103,8 @@ export function ClippingHudRow({
         onClick={onCancel}
         className={cn(
           "flex h-auto min-h-0 shrink-0 items-center justify-center rounded-full border-0 px-2 py-1 font-normal shadow-none ring-0 sm:px-2.5 sm:py-1.5",
-          "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
-          "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+          "text-zinc-700 hover:bg-zinc-200/80 hover:text-zinc-950 active:scale-[0.99]",
+          "focus-visible:ring-2 focus-visible:ring-zinc-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-[#e8ecef]",
         )}
       >
         <span className="flex min-h-[1.1rem] items-center justify-center [&_svg]:size-[1.05rem] sm:[&_svg]:size-[1.15rem]">

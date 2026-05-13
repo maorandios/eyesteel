@@ -5,7 +5,6 @@ import { useShallow } from "zustand/react/shallow";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
-import { MultiSelectWeightPill } from "@/components/viewer/MultiSelectWeightPill";
 import { Button } from "@/components/ui/button";
 import { useAppStore } from "@/lib/state/app-store";
 import { useClippingStore } from "@/lib/state/clipping-store";
@@ -82,6 +81,8 @@ const VIEWER_SIDE_PANEL_CHROME =
   "[&_thead]:text-zinc-500 [&_tbody_tr]:border-zinc-200 [&_th]:text-zinc-500 [&_td]:text-zinc-700 [&_td.font-medium]:text-zinc-900 [&_p]:text-zinc-600";
 const VIEWER_SIDE_PANEL_SCROLL =
   "scrollbar-thin scrollbar-track-transparent scrollbar-thumb-zinc-400/70 hover:scrollbar-thumb-zinc-500/80 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-400/70 hover:[&::-webkit-scrollbar-thumb]:bg-zinc-500/80";
+const VIEWER_TOP_STRIP_RESERVE = "top-[calc(2.5rem+env(safe-area-inset-top))]";
+const VIEWER_BOTTOM_STRIP_RESERVE = "bottom-[calc(3.75rem+env(safe-area-inset-bottom))]";
 
 type SelectionMode = "part" | "assembly";
 type ModelDataTab = "assemblies" | "parts" | "profiles";
@@ -1454,25 +1455,46 @@ export default function ViewerPage() {
       ) : null}
 
       <ViewerSnapshotToasts copyToastVisible={snapshotCopyToast} />
-      <div className="pointer-events-auto absolute left-3 top-3 z-40 safe-top">
+
+      <div
+        className="pointer-events-auto absolute inset-x-0 top-0 z-40 flex h-10 items-center justify-between border-b border-zinc-300/80 bg-[#e8ecef] px-3 pt-[env(safe-area-inset-top)] shadow-[0_8px_22px_rgba(39,39,42,0.07)]"
+        dir="ltr"
+      >
         <Button
-          variant="secondary"
-          className="h-8 rounded-full px-3 text-xs font-medium shadow-lg"
+          variant="ghost"
+          className="h-8 gap-1 rounded-md px-2 text-xs font-medium text-zinc-700 hover:bg-zinc-200/80 hover:text-zinc-950"
           onClick={() => router.push("/")}
           dir="ltr"
         >
           <MoveLeft className="size-3.5" aria-hidden />
           <span dir="rtl">חזרה</span>
         </Button>
+
+        {!inspectionActive && pickInteractionMode === "multi" && multiSelectedCount > 0 ? (
+          <div
+            className="pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 text-xs font-medium text-zinc-700"
+            dir="rtl"
+            role="status"
+            aria-live="polite"
+            aria-label={`משקל כללי ${formatKgPlain(multiSelectTotalWeightKg)} קילוגרם`}
+          >
+            <span className="text-zinc-500">משקל כללי</span>
+            <span className="h-1 w-1 rounded-full bg-zinc-400/80" aria-hidden />
+            <span className="inline-flex flex-row items-center gap-1 font-semibold text-zinc-900" dir="ltr">
+              <span>ק״ג</span>
+              <span>{formatKgPlain(multiSelectTotalWeightKg)}</span>
+            </span>
+          </div>
+        ) : null}
+
+        <div className="min-w-0 max-w-[65vw] truncate text-right text-xs font-medium text-zinc-700" dir="ltr">
+          {file?.name ?? ""}
+        </div>
       </div>
 
       <div className="pointer-events-auto absolute left-3 top-[3.25rem] z-30 max-w-[70vw] text-xs text-red-400 safe-top">
         {loadingState === "error" ? "שגיאה בטעינת IFC" : ""}
       </div>
-
-      {!inspectionActive && pickInteractionMode === "multi" && multiSelectedCount > 0 ? (
-        <MultiSelectWeightPill totalWeightKg={multiSelectTotalWeightKg} />
-      ) : null}
 
       {!inspectionActive &&
         elementContextPanel &&
@@ -1648,7 +1670,7 @@ export default function ViewerPage() {
       )}
 
       {showFilterPanel && (
-        <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex">
+        <div className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}>
           <aside
             className={VIEWER_SIDE_PANEL_CHROME}
             dir="rtl"
@@ -1663,7 +1685,7 @@ export default function ViewerPage() {
       )}
 
       {showDataPanel && (
-        <div className="pointer-events-none absolute inset-y-0 right-0 z-30 flex">
+        <div className={`pointer-events-none absolute right-0 z-30 flex ${VIEWER_TOP_STRIP_RESERVE} ${VIEWER_BOTTOM_STRIP_RESERVE}`}>
           <aside
             className={VIEWER_SIDE_PANEL_CHROME}
             dir="rtl"

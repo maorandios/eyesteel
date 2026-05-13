@@ -6,7 +6,7 @@ import { CircleX, EyeOff, RotateCcw, Scan, SquaresSubtract } from "lucide-react"
 import { cn } from "@/lib/utils";
 
 const multiPillLabelClass =
-  "max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]";
+  "max-w-[4.75rem] text-zinc-700 sm:max-w-[5.85rem]";
 
 export type MultiSelectHudProps = {
   selectedCount: number;
@@ -90,8 +90,8 @@ export function MultiSelectActionBar({
           disabled={disabled}
           className={cn(
             exitBtnClass,
-            "text-zinc-100 hover:bg-zinc-800/40 active:scale-[0.99]",
-            "focus-visible:ring-2 focus-visible:ring-zinc-500/50 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+            "text-zinc-700 hover:bg-zinc-200/80 hover:text-zinc-950 active:scale-[0.99]",
+            "focus-visible:ring-2 focus-visible:ring-zinc-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-[#e8ecef]",
           )}
           onClick={onDone}
         >

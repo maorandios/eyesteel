@@ -24,9 +24,9 @@ import { cn } from "@/lib/utils";
 type FilterTab = ViewFilterGhostTab;
 const PANEL_SCROLL =
   "scrollbar-thin scrollbar-track-transparent scrollbar-thumb-zinc-400/70 hover:scrollbar-thumb-zinc-500/80 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-400/70 hover:[&::-webkit-scrollbar-thumb]:bg-zinc-500/80";
-const EYE_BUTTON_CLASS = "text-[#009DFF] hover:bg-[#009DFF]/10 hover:text-[#009DFF]";
-const EYE_BUTTON_DISABLED_CLASS = "cursor-not-allowed text-[#009DFF]/50";
-const EYE_ICON_CLASS = "!text-[#009DFF]";
+const EYE_BUTTON_CLASS = "text-[#003CFF] hover:bg-[#003CFF]/10 hover:text-[#003CFF]";
+const EYE_BUTTON_DISABLED_CLASS = "cursor-not-allowed text-[#003CFF]/50";
+const EYE_ICON_CLASS = "!text-[#003CFF]";
 
 function aggregatePartsForAssemblyRow(row: AggregatedAssemblyRow): { part: AnalyzerPart; qty: number }[] {
   const m = new Map<string, { part: AnalyzerPart; qty: number }>();
@@ -77,7 +77,7 @@ function TabGhostEye({
         type="button"
         className={cn(
           "grid size-7 shrink-0 place-items-center rounded-md transition-colors",
-          ghostOnThisTab ? "bg-[#009DFF]/10 text-[#009DFF]" : EYE_BUTTON_CLASS,
+          ghostOnThisTab ? "bg-[#003CFF]/10 text-[#003CFF]" : EYE_BUTTON_CLASS,
         )}
         title="מצב רוח (כמו הצג בהקשר): לחץ שורות בטבלה כדי להציג רגיל"
         aria-label={`מצב רוח בשונית ${label}`}
