@@ -4,7 +4,7 @@ import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as OBF from "@thatopen/components-front";
 import CameraControls from "camera-controls";
-import { LodMode, type FragmentsModel } from "@thatopen/fragments";
+import { LodMode, type FragmentsModel, type MeshData } from "@thatopen/fragments";
 import type { AnalyzerOutput, ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
 import { normalizeIfcGuidKey } from "@/lib/viewer/ifc-guid";
@@ -128,6 +128,7 @@ const ORTHO_DISTANCE_K = 1.75;
 const VIEWER_TOP_CHROME_PX = 80;
 /** Bottom floating dock + gap (px). */
 const VIEWER_BOTTOM_DOCK_RESERVE_PX = 176;
+const FRAGMENTS_LOD_GEOMETRY = 0 as const;
 /**
  * Extra zoom‑out on top of {@link ORTHO_MARGIN} for docked מבט / section ortho so the full face has
  * clear margin inside the visible viewport (not edge‑clipped).
@@ -169,6 +170,8 @@ export class ViewerEngine {
   private readonly lastPointerNdc = new THREE.Vector2(0, 0);
   private downPos: { x: number; y: number; t: number; pointerType: string } | null = null;
   private pickCallback: ((hit: PickHit | null) => void) | null = null;
+  private pickPriorityLocalIds: number[] = [];
+  private readonly pickPriorityRaycaster = new THREE.Raycaster();
   /**
    * World point the camera orbits/trucks/dollies around — same source of truth for (1) element tap
    * picks and (2) canvas gestures: both use {@link OBC.FastModelPickers#getFullPick} when available.
@@ -375,7 +378,7 @@ export class ViewerEngine {
     const closeT = Math.min(1, d / Math.max(ref * 0.32, 1e-6));
     const truckCloseFactor = 0.42 + 0.58 * Math.pow(closeT, 0.9);
     const dollyCloseFactor = 0.28 + 0.72 * Math.pow(closeT, 1.1);
-    let truck = truckBase * truckGain * truckCloseFactor;
+    const truck = truckBase * truckGain * truckCloseFactor;
     let dolly = dollyBase * dollyGain * dollyCloseFactor;
     if (this.isInspectionVisualizationSessionActive()) {
       dolly *= 0.82;
@@ -597,7 +600,7 @@ export class ViewerEngine {
     const renderer = this.world.renderer as OBF.RendererWith2D;
     this.orthoResizeHandler = () => {
       if (this.disposed || this.activeOrthoViewMode === null) return;
-      let box = new THREE.Box3();
+      const box = new THREE.Box3();
       if (this.inspectionSessionFramingBox) {
         box.copy(this.inspectionSessionFramingBox);
       } else if (this.modelObject) {
@@ -1193,6 +1196,72 @@ export class ViewerEngine {
     return null;
   }
 
+  private meshDataToPickGeometry(mesh: MeshData): THREE.BufferGeometry | null {
+    if (!mesh.positions || mesh.positions.length < 9) return null;
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(mesh.positions), 3));
+    if (mesh.indices && mesh.indices.length >= 3) {
+      const index = mesh.indices instanceof Uint32Array ? mesh.indices : Uint32Array.from(mesh.indices);
+      geom.setIndex(new THREE.BufferAttribute(index, 1));
+    }
+    if (mesh.transform) geom.applyMatrix4(mesh.transform);
+    geom.computeBoundingSphere();
+    return geom;
+  }
+
+  private async pickPriorityLocalAtPoint(ndc: THREE.Vector2): Promise<number | null> {
+    if (
+      this.disposed ||
+      !this.modelId ||
+      !this.modelObject ||
+      this.pickPriorityLocalIds.length === 0
+    ) {
+      return null;
+    }
+
+    const camera = this.world.camera?.three;
+    if (!camera) return null;
+    const fragments = this.components.get(OBC.FragmentsManager);
+    const fragModel = fragments.list.get(this.modelId);
+    if (!fragModel) return null;
+
+    this.pickPriorityRaycaster.setFromCamera(ndc, camera);
+    let best: { localId: number; distance: number } | null = null;
+    const tempMaterial = new THREE.MeshBasicMaterial();
+    try {
+      for (let i = 0; i < this.pickPriorityLocalIds.length; i += 48) {
+        const slice = this.pickPriorityLocalIds.slice(i, i + 48);
+        let itemGeoms: MeshData[][];
+        try {
+          itemGeoms = await fragModel.getItemsGeometry(slice, FRAGMENTS_LOD_GEOMETRY);
+        } catch {
+          continue;
+        }
+
+        for (let j = 0; j < slice.length; j++) {
+          const localId = slice[j];
+          for (const md of itemGeoms[j] ?? []) {
+            const geom = this.meshDataToPickGeometry(md);
+            if (!geom) continue;
+            const mesh = new THREE.Mesh(geom, tempMaterial);
+            mesh.matrixWorld.copy(this.modelObject.matrixWorld);
+            mesh.matrixAutoUpdate = false;
+            const hit = this.pickPriorityRaycaster.intersectObject(mesh, false)[0];
+            geom.dispose();
+            if (!hit) continue;
+            if (!best || hit.distance < best.distance) {
+              best = { localId, distance: hit.distance };
+            }
+          }
+        }
+      }
+    } finally {
+      tempMaterial.dispose();
+    }
+
+    return best?.localId ?? null;
+  }
+
   /** Meshes whose `position` buffer exists on CPU — avoids fragment tiles that throw in BVH raycast. */
   private collectMeshesWithCpuPosition(root: THREE.Object3D): THREE.Mesh[] {
     const meshes: THREE.Mesh[] = [];
@@ -1446,7 +1515,7 @@ export class ViewerEngine {
     }
 
     const visibleLocals = allIds.filter((id) => !excluded.has(id));
-    let overlay = await buildPickedEdgeOverlay(
+    const overlay = await buildPickedEdgeOverlay(
       fragModel,
       this.modelObject,
       visibleLocals,
@@ -1563,16 +1632,13 @@ export class ViewerEngine {
   private attachSketchRebuildWhenTilesReady(fragModel: FragmentsModel) {
     this.detachSketchTilesListener();
 
-    let onViewUpdated: () => void;
-    let onTileSet: () => void;
-
     const cleanup = () => {
       fragModel.onViewUpdated.remove(onViewUpdated);
       fragModel.tiles.onItemSet.remove(onTileSet);
       this.sketchTilesUnsub = null;
     };
 
-    onViewUpdated = () => {
+    const onViewUpdated = () => {
       if (this.disposed) {
         cleanup();
         return;
@@ -1580,7 +1646,7 @@ export class ViewerEngine {
       this.syncSketchEdgesForNewTiles();
     };
 
-    onTileSet = () => {
+    const onTileSet = () => {
       if (this.disposed) return;
       queueMicrotask(() => {
         if (!this.disposed) this.syncSketchEdgesForNewTiles({ tileMount: true });
@@ -1830,6 +1896,10 @@ export class ViewerEngine {
 
   setPickCallback(cb: ((hit: PickHit | null) => void) | null) {
     this.pickCallback = cb;
+  }
+
+  setPickPriorityLocalIds(localIds: Iterable<number>) {
+    this.pickPriorityLocalIds = [...new Set(localIds)].filter((n) => Number.isFinite(n));
   }
 
   /**
@@ -2121,6 +2191,24 @@ export class ViewerEngine {
       );
       let hit: PickHit | null = null;
       try {
+        const priorityLocalId = await this.pickPriorityLocalAtPoint(mouse);
+        if (priorityLocalId != null) {
+          hit = {
+            localId: priorityLocalId,
+            itemId: priorityLocalId,
+            clientX: useX,
+            clientY: useY,
+          };
+        }
+      } catch (error) {
+        console.error("[picker] selected-first pick failed:", error);
+      }
+
+      try {
+        if (hit) {
+          this.pickCallback(hit);
+          return;
+        }
         const pickers = this.components.get(OBC.FastModelPickers);
         const picker = pickers.get(this.world);
         const full = await picker.getFullPick(mouse);

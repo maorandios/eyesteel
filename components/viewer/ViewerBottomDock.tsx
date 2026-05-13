@@ -31,6 +31,7 @@ import {
   Bolt,
   Camera,
   CircleX,
+  EyeOff,
   ImageDown,
   Images,
   FoldHorizontal,
@@ -41,13 +42,25 @@ import {
   Pencil,
   RotateCcw,
   RulerDimensionLine,
+  Scan,
   Search,
   SquaresIntersect,
+  SquaresSubtract,
   SquaresUnite,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { IsolationMode } from "@/lib/state/isolation-store";
 
 type SelectionMode = "part" | "assembly";
+
+export type ElementIsolationHudProps = {
+  isolationMode: IsolationMode;
+  disabled?: boolean;
+  onIsolate: () => void;
+  onContext: () => void;
+  onHide: () => void;
+  onShowAll: () => void;
+};
 
 const dockLabelClass =
   "max-w-[3.625rem] text-center text-[9px] font-medium leading-tight tracking-tight text-zinc-400 sm:max-w-[4.375rem] sm:text-[11px]";
@@ -169,6 +182,8 @@ interface Props {
   onMultiSelectEnter?: () => void;
   /** When בחירה מרובה session is active, pill HUD above main dock (same chrome as clipping). */
   multiSelectHud?: MultiSelectHudProps;
+  /** Active picked-element isolation/context controls, shown above the main dock. */
+  elementIsolationHud?: ElementIsolationHudProps;
   markupDrawingActive?: boolean;
   markupDrawingDisabled?: boolean;
   onMarkupDrawingToggle?: () => void;
@@ -217,6 +232,7 @@ export function ViewerBottomDock({
   multiSelectEnterDisabled = false,
   multiSelectIsolationBlocksEnter = false,
   multiSelectHud,
+  elementIsolationHud,
   onMultiSelectEnter,
   markupDrawingActive = false,
   markupDrawingDisabled = false,
@@ -387,6 +403,63 @@ export function ViewerBottomDock({
       {multiSelectHud ? (
         <div className="pointer-events-auto flex w-full shrink-0 justify-center">
           <MultiSelectActionBar {...multiSelectHud} />
+        </div>
+      ) : null}
+      {elementIsolationHud ? (
+        <div
+          className="pointer-events-auto flex w-full shrink-0 justify-center"
+          role="region"
+          aria-label="מצב אלמנט נבחר"
+        >
+          <DockSubmenuBar className="w-fit justify-center px-1.5 sm:px-2">
+            <DockSubmenuPill
+              label="בידוד חלק"
+              labelClassName="max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]"
+              title="בודד את האלמנט הנבחר"
+              aria-label="בידוד חלק"
+              selected={elementIsolationHud.isolationMode === "isolated"}
+              className="min-w-[3.5rem] shrink-0 sm:min-w-[3.85rem]"
+              disabled={elementIsolationHud.disabled}
+              onClick={elementIsolationHud.onIsolate}
+            >
+              <Scan aria-hidden />
+            </DockSubmenuPill>
+            <DockSubmenuPill
+              label="הצג בשקיפות"
+              labelClassName="max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]"
+              title="הצג את האלמנט בהקשר שקוף"
+              aria-label="הצג בשקיפות"
+              selected={elementIsolationHud.isolationMode === "context"}
+              className="min-w-[3.5rem] shrink-0 sm:min-w-[3.85rem]"
+              disabled={elementIsolationHud.disabled}
+              onClick={elementIsolationHud.onContext}
+            >
+              <SquaresSubtract aria-hidden />
+            </DockSubmenuPill>
+            <DockSubmenuPill
+              label="הסתרה"
+              labelClassName="max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]"
+              title="הסתר את האלמנט הנבחר"
+              aria-label="הסתרה"
+              selected={elementIsolationHud.isolationMode === "hidden"}
+              className="min-w-[3.25rem] shrink-0 sm:min-w-[3.65rem]"
+              disabled={elementIsolationHud.disabled}
+              onClick={elementIsolationHud.onHide}
+            >
+              <EyeOff aria-hidden />
+            </DockSubmenuPill>
+            <DockSubmenuPill
+              label="הצג הכל"
+              labelClassName="max-w-[4.75rem] text-zinc-100 sm:max-w-[5.85rem]"
+              title="הצג את כל המודל"
+              aria-label="הצג הכל"
+              className="min-w-[3.25rem] shrink-0 sm:min-w-[3.65rem]"
+              disabled={elementIsolationHud.disabled || elementIsolationHud.isolationMode === "none"}
+              onClick={elementIsolationHud.onShowAll}
+            >
+              <RotateCcw aria-hidden />
+            </DockSubmenuPill>
+          </DockSubmenuBar>
         </div>
       ) : null}
       {measurementActive ? (

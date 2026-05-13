@@ -5,6 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Binoculars, EyeOff, Scan, SquaresSubtract } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+/** Marker for global dismiss handlers (see viewer page). */
+export const ELEMENT_PICK_PANEL_ATTR = "data-element-pick-panel" as const;
+
 export type ElementPickContextPanelState = {
   clientX: number;
   clientY: number;
@@ -20,8 +23,9 @@ type Props = {
   onInspect: () => void;
 };
 
+/** Compact rows: under `dir="rtl"`, icon first in DOM sits to the *visual* right of the label. */
 const rowBtn =
-  "flex h-auto w-full flex-col items-end justify-center gap-1 rounded-xl border-0 bg-transparent px-3 py-2.5 text-right text-sm font-medium text-zinc-100 shadow-none hover:bg-zinc-800/45 active:scale-[0.99] [&_svg]:size-[1.1rem] [&_svg]:shrink-0";
+  "flex h-auto w-full min-w-0 flex-row items-center justify-start gap-1 rounded-lg border-0 bg-transparent px-1.5 py-1.5 text-right text-xs font-medium text-zinc-100 shadow-none hover:bg-zinc-800/45 active:scale-[0.99] [&_svg]:size-[0.88rem] [&_svg]:shrink-0";
 
 /**
  * Vertical action rail at the pick point — same icons as {@link MultiSelectActionBar}; בדיקה uses binoculars (מבט בדיקה).
@@ -51,24 +55,25 @@ export function ElementPickContextPanel({ state, onIsolate, onContext, onHide, o
   return (
     <div
       ref={rootRef}
-      className="pointer-events-auto fixed z-[52] w-[min(13.5rem,calc(100vw-1.5rem))] rounded-2xl border border-zinc-600/90 bg-zinc-950/95 p-1.5 shadow-2xl backdrop-blur-md"
+      {...{ [ELEMENT_PICK_PANEL_ATTR]: "" }}
+      className="pointer-events-auto fixed z-[52] w-max min-w-0 max-w-[min(9.25rem,calc(100vw-1rem))] rounded-xl border border-zinc-600/90 bg-zinc-950/95 px-0.5 py-0.5 shadow-2xl backdrop-blur-md"
       style={{ left: pos.left, top: pos.top }}
       dir="rtl"
       role="menu"
       aria-label="פעולות על האלמנט"
     >
-      <div className="flex flex-col gap-0.5">
+      <div className="flex w-max min-w-0 flex-col gap-px">
         <Button type="button" variant="ghost" className={cn(rowBtn)} disabled={noIds} onClick={onIsolate}>
-          <Scan aria-hidden />
-          בידוד חלק
+          <Scan aria-hidden className="shrink-0" />
+          <span className="min-w-0 whitespace-nowrap text-right leading-tight">בידוד חלק</span>
         </Button>
         <Button type="button" variant="ghost" className={cn(rowBtn)} disabled={noIds} onClick={onContext}>
-          <SquaresSubtract aria-hidden />
-          הצג בשקיפות
+          <SquaresSubtract aria-hidden className="shrink-0" />
+          <span className="min-w-0 whitespace-nowrap text-right leading-tight">הצג בשקיפות</span>
         </Button>
         <Button type="button" variant="ghost" className={cn(rowBtn)} disabled={noIds} onClick={onHide}>
-          <EyeOff aria-hidden />
-          הסתרה
+          <EyeOff aria-hidden className="shrink-0" />
+          <span className="min-w-0 whitespace-nowrap text-right leading-tight">הסתרה</span>
         </Button>
         <Button
           type="button"
@@ -77,8 +82,8 @@ export function ElementPickContextPanel({ state, onIsolate, onContext, onHide, o
           disabled={!state.showInspect}
           onClick={onInspect}
         >
-          <Binoculars aria-hidden />
-          בדיקה
+          <Binoculars aria-hidden className="shrink-0" />
+          <span className="min-w-0 whitespace-nowrap text-right leading-tight">בדיקה</span>
         </Button>
       </div>
     </div>

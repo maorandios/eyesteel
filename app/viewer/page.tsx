@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
 import { CompactModeNav } from "@/components/viewer/CompactModeNav";
 import { ViewerBottomDock } from "@/components/viewer/ViewerBottomDock";
-import { IsolationActionBar } from "@/components/viewer/IsolationActionBar";
+import { MultiSelectWeightPill } from "@/components/viewer/MultiSelectWeightPill";
 import { Button } from "@/components/ui/button";
 import { modeConfig } from "@/lib/modes/config";
 import { useAppStore } from "@/lib/state/app-store";
@@ -19,7 +19,10 @@ import {
   type InspectionRevertBundle,
   useInspectionStore,
 } from "@/lib/state/inspection-store";
-import { useMultiSelectStore } from "@/lib/state/multi-select-store";
+import {
+  type MultiSelectWeightItem,
+  useMultiSelectStore,
+} from "@/lib/state/multi-select-store";
 import { ViewerEngine, type ApplyIsolationOptions } from "@/lib/viewer/engine";
 import { findAssemblyLabelForPart } from "@/lib/viewer/inspection-assembly";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
@@ -42,12 +45,12 @@ import {
 } from "@/components/viewer/DrawingMarkupLayer";
 import {
   ElementPickContextPanel,
+  ELEMENT_PICK_PANEL_ATTR,
   type ElementPickContextPanelState,
 } from "@/components/viewer/ElementPickContextPanel";
 import { ViewerSnapshotToasts } from "@/components/viewer/ViewerSnapshotToasts";
 import { InspectionModeToolbar } from "@/components/viewer/InspectionModeToolbar";
 import { InspectionPanel } from "@/components/viewer/InspectionPanel";
-import { PartInspectionCallout } from "@/components/viewer/PartInspectionCallout";
 import { GlobalSearchOverlay } from "@/components/viewer/GlobalSearchOverlay";
 import { ViewFilterPanel } from "@/components/viewer/ViewFilterPanel";
 import { useViewFilterSync } from "@/hooks/use-view-filter-sync";
@@ -74,8 +77,14 @@ import {
 const ASSEMBLY_STRUCTURE_NOTICE_HE =
   "המודל אינו מכיל חלוקה לאסמבליז, נדרש לייצא את המודל שוב עם חלוקה לאמסבליז במצב פעיל";
 
+const ELEMENT_PICK_CONTEXT_PANEL_SELECTOR = `[${ELEMENT_PICK_PANEL_ATTR}]`;
+
 type SelectionMode = "part" | "assembly";
 type ModelDataTab = "assemblies" | "parts" | "profiles";
+
+function multiSelectFallbackWeightKey(ids: readonly number[]): string {
+  return `local:${[...new Set(ids)].filter(Number.isFinite).sort((a, b) => a - b).join(",")}`;
+}
 
 export default function ViewerPage() {
   const router = useRouter();
@@ -131,7 +140,9 @@ export default function ViewerPage() {
   const inspectionPartId = useInspectionStore((s) => s.selectedPartId);
   const inspectionViewMode = useInspectionStore((s) => s.inspectionViewMode);
   const pickInteractionMode = useMultiSelectStore((s) => s.pickInteractionMode);
+  const multiSelectedLocalIds = useMultiSelectStore((s) => s.selectedLocalIds);
   const multiSelectedCount = useMultiSelectStore((s) => s.selectedLocalIds.length);
+  const multiSelectWeightItems = useMultiSelectStore((s) => s.selectedWeightItems);
 
   const clipSnap = useClippingStore(
     useShallow((s) => ({
@@ -144,6 +155,58 @@ export default function ViewerPage() {
       flipped: s.flipped,
     })),
   );
+
+  const multiSelectTotalWeightKg = useMemo(() => {
+    if (multiSelectedCount === 0 || multiSelectWeightItems.length === 0) return null;
+    let total = 0;
+    for (const item of multiSelectWeightItems) {
+      if (item.weightKg == null || Number.isNaN(item.weightKg)) return null;
+      total += item.weightKg;
+    }
+    return total;
+  }, [multiSelectedCount, multiSelectWeightItems]);
+
+  useEffect(() => {
+    if (!elementContextPanel) return;
+
+    const dismiss = () => setElementContextPanel(null);
+
+    const inside = (t: EventTarget | null) =>
+      t instanceof Element && t.closest(ELEMENT_PICK_CONTEXT_PANEL_SELECTOR) !== null;
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (!inside(e.target)) dismiss();
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (e.buttons !== 0) dismiss();
+    };
+
+    const onWheel = () => dismiss();
+
+    const onContextMenu = (e: MouseEvent) => {
+      if (!inside(e.target)) dismiss();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("wheel", onWheel, { capture: true, passive: true });
+    document.addEventListener("contextmenu", onContextMenu, true);
+
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointermove", onPointerMove, true);
+      document.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
+      document.removeEventListener("contextmenu", onContextMenu, true);
+    };
+  }, [elementContextPanel]);
+
+  useEffect(() => {
+    if (!engine) return;
+    engine.setPickPriorityLocalIds(
+      pickInteractionMode === "multi" ? multiSelectedLocalIds : [],
+    );
+  }, [engine, pickInteractionMode, multiSelectedLocalIds]);
 
   useEffect(() => {
     if (!engine || loadingState !== "ready") {
@@ -677,7 +740,10 @@ export default function ViewerPage() {
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("isolated", ids, isolationApplyOpts);
+    const ok = await engine.applyIsolation("isolated", ids, {
+      ...isolationApplyOpts,
+      focus: false,
+    });
     if (ok) useIsolationStore.getState().setIsolation("isolated", [...ids]);
   }, [engine, isolationApplyOpts, isolationRefs]);
 
@@ -687,7 +753,10 @@ export default function ViewerPage() {
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("context", ids, isolationApplyOpts);
+    const ok = await engine.applyIsolation("context", ids, {
+      ...isolationApplyOpts,
+      focus: false,
+    });
     if (ok) useIsolationStore.getState().setIsolation("context", [...ids]);
   }, [engine, isolationApplyOpts, isolationRefs]);
 
@@ -697,7 +766,10 @@ export default function ViewerPage() {
     if (ids.size === 0) {
       return;
     }
-    const ok = await engine.applyIsolation("hidden", ids, isolationApplyOpts);
+    const ok = await engine.applyIsolation("hidden", ids, {
+      ...isolationApplyOpts,
+      focus: false,
+    });
     if (ok) useIsolationStore.getState().setIsolation("hidden", [...ids]);
   }, [engine, isolationApplyOpts, isolationRefs]);
 
@@ -1045,16 +1117,35 @@ export default function ViewerPage() {
 
       if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
         setElementContextPanel(null);
-        const toggleAndHighlight = async (targetIds: number[]) => {
+        const toggleAndHighlight = async (
+          targetIds: number[],
+          weightItem?: MultiSelectWeightItem,
+        ) => {
           const uniq = [...new Set(targetIds)].filter(
             (n) => typeof n === "number" && Number.isFinite(n),
           );
           if (uniq.length === 0) return;
-          useMultiSelectStore.getState().toggleLocalIds(uniq);
+          useMultiSelectStore.getState().toggleLocalIds(
+            uniq,
+            weightItem ?? {
+              key: multiSelectFallbackWeightKey(uniq),
+              weightKg: null,
+            },
+          );
           const sel = useMultiSelectStore.getState().selectedLocalIds;
           await engine.highlightFragmentLocalSet(new Set(sel));
           setSelectionStatus(`בחירה מרובה: ${formatCount(sel.length)} אלמנטים`);
         };
+
+        const pickedSelectedWeightItem = useMultiSelectStore
+          .getState()
+          .selectedWeightItems.find((item) =>
+            (item.localIds ?? []).some((id) => pickCtx.localIds.includes(id)),
+          );
+        if (pickedSelectedWeightItem?.localIds?.length) {
+          await toggleAndHighlight(pickedSelectedWeightItem.localIds, pickedSelectedWeightItem);
+          return;
+        }
 
         if (!analyzerData) {
           await toggleAndHighlight(highlightIds);
@@ -1090,7 +1181,10 @@ export default function ViewerPage() {
           const assembly = choosePreferredAssemblyForModelPick(candidates);
           if (assembly) {
             const set = await engine.resolveIsolationLocalIds(analyzerRefsFromAssembly(assembly));
-            await toggleAndHighlight([...set]);
+            await toggleAndHighlight([...set], {
+              key: `assembly:${assembly.id}`,
+              weightKg: assembly.weightKg,
+            });
             return;
           }
         }
@@ -1101,7 +1195,10 @@ export default function ViewerPage() {
 
         if (part) {
           const set = await engine.resolveIsolationLocalIds([{ id: part.id, expressId: part.expressId }]);
-          await toggleAndHighlight([...set]);
+          await toggleAndHighlight([...set], {
+            key: `${isAnalyzerBoltRow(part) ? "bolt" : "part"}:${part.id}`,
+            weightKg: isAnalyzerBoltRow(part) ? null : part.weightKg,
+          });
           return;
         }
 
@@ -1372,6 +1469,10 @@ export default function ViewerPage() {
 
       {!inspectionActive && <CompactModeNav mode={mode} onModeChange={setMode} />}
 
+      {!inspectionActive && pickInteractionMode === "multi" && multiSelectedCount > 0 ? (
+        <MultiSelectWeightPill totalWeightKg={multiSelectTotalWeightKg} />
+      ) : null}
+
       <div className="pointer-events-auto absolute right-3 top-[4.75rem] z-20 flex max-w-[min(19rem,88vw)] flex-col items-end gap-1 safe-top">
         {analyzerData && (
           <div className="rounded-lg border border-zinc-700 bg-zinc-900/88 px-2 py-1 text-[10px] leading-tight text-zinc-300">
@@ -1385,38 +1486,6 @@ export default function ViewerPage() {
           נקה בחירה
         </Button>
       </div>
-
-      <IsolationActionBar
-        visible={
-          !inspectionActive &&
-          pickInteractionMode !== "multi" &&
-          (isolationMode !== "none" || isolationRefs.length > 0) &&
-          loadingState === "ready"
-        }
-        isolationMode={isolationMode}
-        disabled={!engine || viewerTool === "measurement"}
-        onIsolate={() => void handleIsolationIsolate()}
-        onContext={() => void handleIsolationContext()}
-        onHide={() => void handleIsolationHide()}
-        onShowAll={() => void handleIsolationShowAll()}
-      />
-
-      <PartInspectionCallout
-        visible={
-          loadingState === "ready" &&
-          !inspectionActive &&
-          !!selectedPart &&
-          !isAnalyzerBoltRow(selectedPart) &&
-          !!selectedPartId &&
-          !selectedAssembly &&
-          !profileGroupDetail &&
-          isolationMode === "none" &&
-          pickInteractionMode !== "multi" &&
-          !elementContextPanel
-        }
-        disabled={!engine}
-        onInspect={() => void handleEnterPartInspection()}
-      />
 
       {!inspectionActive &&
         elementContextPanel &&
@@ -1545,6 +1614,23 @@ export default function ViewerPage() {
                 onHide: () => void handleMultiHide(),
                 onClear: () => void handleMultiClear(),
                 onDone: () => void handleMultiDone(),
+              }
+            : undefined
+        }
+        elementIsolationHud={
+          !inspectionActive &&
+          pickInteractionMode !== "multi" &&
+          isolationMode !== "none" &&
+          loadingState === "ready" &&
+          !snapshotSessionOpen &&
+          !markupDrawingEnabled
+            ? {
+                isolationMode,
+                disabled: !engine || viewerTool === "measurement",
+                onIsolate: () => void handleIsolationIsolate(),
+                onContext: () => void handleIsolationContext(),
+                onHide: () => void handleIsolationHide(),
+                onShowAll: () => void handleIsolationShowAll(),
               }
             : undefined
         }
