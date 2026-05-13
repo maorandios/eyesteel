@@ -68,6 +68,10 @@ export interface PickHit {
   /** Viewport CSS pixels of the tap — for contextual UI anchored to the pick. */
   clientX?: number;
   clientY?: number;
+  /** Mouse button used for this pick. 0 = left click, 2 = right click. */
+  button?: number;
+  /** Desktop shortcut modifier captured at pointer-up time. */
+  ctrlKey?: boolean;
 }
 
 /** Saved before מצב בדיקה so camera + orthographic מבט restore exactly after exit. */
@@ -170,9 +174,17 @@ export class ViewerEngine {
   /** Viewer container capture — measurement taps hit here before canvas/CSS layers (mobile-safe). */
   private hostMeasurePointerDownCapture: ((event: PointerEvent) => void) | null = null;
   private readonly lastPointerNdc = new THREE.Vector2(0, 0);
-  private downPos: { x: number; y: number; t: number; pointerType: string } | null = null;
+  private downPos: {
+    x: number;
+    y: number;
+    t: number;
+    pointerType: string;
+    button: number;
+    ctrlKey: boolean;
+  } | null = null;
   private pickCallback: ((hit: PickHit | null) => void) | null = null;
   private pickPriorityLocalIds: number[] = [];
+  private pickPriorityMode: "all" | "right-click" = "all";
   private readonly pickPriorityRaycaster = new THREE.Raycaster();
   /**
    * World point the camera orbits/trucks/dollies around — same source of truth for (1) element tap
@@ -1900,8 +1912,12 @@ export class ViewerEngine {
     this.pickCallback = cb;
   }
 
-  setPickPriorityLocalIds(localIds: Iterable<number>) {
+  setPickPriorityLocalIds(
+    localIds: Iterable<number>,
+    mode: "all" | "right-click" = "all",
+  ) {
     this.pickPriorityLocalIds = [...new Set(localIds)].filter((n) => Number.isFinite(n));
+    this.pickPriorityMode = mode;
   }
 
   /**
@@ -2126,7 +2142,7 @@ export class ViewerEngine {
       if (!this.pointerDownArmsModelTap(event, canvas)) return;
 
       syncNdc(event);
-      if (event.button !== 0 && event.pointerType === "mouse") return;
+      if (event.pointerType === "mouse" && event.button !== 0 && event.button !== 2) return;
       if (
         event.pointerType === "mouse" &&
         event.isPrimary &&
@@ -2145,6 +2161,8 @@ export class ViewerEngine {
         y: event.clientY,
         t: Date.now(),
         pointerType: event.pointerType,
+        button: event.button,
+        ctrlKey: event.ctrlKey,
       };
     };
 
@@ -2176,6 +2194,8 @@ export class ViewerEngine {
       if (rect.width === 0 || rect.height === 0) return;
       const useX = event.clientX || start.x;
       const useY = event.clientY || start.y;
+      const pickButton = start.button;
+      const pickCtrlKey = start.ctrlKey || event.ctrlKey;
 
       if (this.viewerTool === "measurement") {
         this.commitMeasurementTap(canvas, useX, useY, event);
@@ -2193,13 +2213,20 @@ export class ViewerEngine {
       );
       let hit: PickHit | null = null;
       try {
-        const priorityLocalId = await this.pickPriorityLocalAtPoint(mouse);
+        const shouldUsePriorityPick =
+          this.pickPriorityLocalIds.length > 0 &&
+          (this.pickPriorityMode === "all" || pickButton === 2);
+        const priorityLocalId = shouldUsePriorityPick
+          ? await this.pickPriorityLocalAtPoint(mouse)
+          : null;
         if (priorityLocalId != null) {
           hit = {
             localId: priorityLocalId,
             itemId: priorityLocalId,
             clientX: useX,
             clientY: useY,
+            button: pickButton,
+            ctrlKey: pickCtrlKey,
           };
         }
       } catch (error) {
@@ -2220,6 +2247,8 @@ export class ViewerEngine {
             itemId: full.itemId,
             clientX: useX,
             clientY: useY,
+            button: pickButton,
+            ctrlKey: pickCtrlKey,
           };
           this.pickOrbitPivotWorld.copy(full.point);
           this.pickOrbitPivotActive = true;

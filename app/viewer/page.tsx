@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type MouseEvent as ReactMouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useRouter } from "next/navigation";
 import { ViewerCanvas } from "@/components/viewer/ViewerCanvas";
@@ -75,6 +82,9 @@ const ASSEMBLY_STRUCTURE_NOTICE_HE =
   "המודל אינו מכיל חלוקה לאסמבליז, נדרש לייצא את המודל שוב עם חלוקה לאמסבליז במצב פעיל";
 
 const ELEMENT_PICK_CONTEXT_PANEL_SELECTOR = `[${ELEMENT_PICK_PANEL_ATTR}]`;
+const VIEWER_CONTEXT_MENU_EXCLUDED_SELECTOR =
+  `${ELEMENT_PICK_CONTEXT_PANEL_SELECTOR},button,a[href],input,textarea,select,label,aside,` +
+  "[role='button'],[role='menu'],[role='menuitem'],[role='tab'],[role='dialog']";
 const VIEWER_SIDE_PANEL_CHROME =
   "pointer-events-auto flex h-full w-[22rem] max-w-[92vw] shrink-0 flex-col border-l border-zinc-300/80 bg-[#eef1f3]/95 p-3 pt-8 text-zinc-800 shadow-[-18px_0_45px_rgba(39,39,42,0.18)] backdrop-blur-xl " +
   "[&_button]:text-zinc-700 [&_button:hover]:bg-zinc-200/80 [&_button:hover]:text-zinc-950 [&_svg]:text-zinc-500 " +
@@ -114,6 +124,7 @@ export default function ViewerPage() {
   const [elementContextPanel, setElementContextPanel] = useState<ElementPickContextPanelState | null>(
     null,
   );
+  const desktopMultiSelectKeyDownRef = useRef(false);
   const [snapshotCapturePending, setSnapshotCapturePending] = useState(false);
   const snapshotBlobRef = useRef<Blob | null>(null);
   const snapshotCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -171,6 +182,27 @@ export default function ViewerPage() {
   }, [multiSelectedCount, multiSelectWeightItems]);
 
   useEffect(() => {
+    const releaseDesktopMultiSelect = () => {
+      desktopMultiSelectKeyDownRef.current = false;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Control") desktopMultiSelectKeyDownRef.current = true;
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Control") releaseDesktopMultiSelect();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", releaseDesktopMultiSelect);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", releaseDesktopMultiSelect);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!elementContextPanel) return;
 
     const dismiss = () => setElementContextPanel(null);
@@ -204,13 +236,6 @@ export default function ViewerPage() {
       document.removeEventListener("contextmenu", onContextMenu, true);
     };
   }, [elementContextPanel]);
-
-  useEffect(() => {
-    if (!engine) return;
-    engine.setPickPriorityLocalIds(
-      pickInteractionMode === "multi" ? multiSelectedLocalIds : [],
-    );
-  }, [engine, pickInteractionMode, multiSelectedLocalIds]);
 
   useEffect(() => {
     if (!engine || loadingState !== "ready") {
@@ -528,6 +553,49 @@ export default function ViewerPage() {
     }
     return partIsolationBoltPolicy?.refs ?? [];
   }, [partIsolationBoltPolicy, selectedAssembly]);
+
+  useEffect(() => {
+    if (!engine) return;
+    let cancelled = false;
+
+    if (pickInteractionMode === "multi") {
+      engine.setPickPriorityLocalIds(multiSelectedLocalIds, "all");
+      return;
+    }
+
+    const syncNormalSelectionRightClickPriority = async () => {
+      const refs = selectedAssembly
+        ? analyzerRefsFromAssembly(selectedAssembly)
+        : selectedPart
+          ? [{ id: selectedPart.id, expressId: selectedPart.expressId }]
+          : (profileGroupDetail?.instances.map((p) => ({
+              id: p.id,
+              expressId: p.expressId,
+            })) ?? []);
+
+      if (refs.length === 0) {
+        engine.setPickPriorityLocalIds([], "right-click");
+        return;
+      }
+
+      const ids = await engine.resolveIsolationLocalIds(refs);
+      if (!cancelled) {
+        engine.setPickPriorityLocalIds(ids, "right-click");
+      }
+    };
+
+    void syncNormalSelectionRightClickPriority();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    engine,
+    multiSelectedLocalIds,
+    pickInteractionMode,
+    profileGroupDetail,
+    selectedAssembly,
+    selectedPart,
+  ]);
 
   /** Re-run סינון תצוגה worker state after anything that calls `resetVisible` (e.g. `clearIsolationVisuals`). */
   const reapplyViewFilterIfNeeded = useCallback(async (eng: ViewerEngine) => {
@@ -850,6 +918,42 @@ export default function ViewerPage() {
     setSelectionStatus("מצב בחירה רגיל");
   }, [engine, restoreFullModelIsolationState]);
 
+  const handleViewerContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLElement>) => {
+      if (
+        loadingState !== "ready" ||
+        inspectionActive ||
+        viewerTool === "measurement" ||
+        snapshotSessionOpen ||
+        markupDrawingEnabled
+      ) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest(VIEWER_CONTEXT_MENU_EXCLUDED_SELECTOR) !== null
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const ids = useMultiSelectStore.getState().selectedLocalIds;
+      if (ids.length === 0) return;
+
+      setElementContextPanel({
+        clientX: event.clientX,
+        clientY: event.clientY,
+        isolationLocalIds: [...ids],
+        showInspect: false,
+      });
+    },
+    [inspectionActive, loadingState, markupDrawingEnabled, snapshotSessionOpen, viewerTool],
+  );
+
   const handleElementPanelIsolate = useCallback(
     async (panel: ElementPickContextPanelState) => {
       if (!engine) return;
@@ -1098,6 +1202,7 @@ export default function ViewerPage() {
          * In "בחירה מרובה" we keep the running set so accidental misses don't wipe it.
          */
         if (useMultiSelectStore.getState().pickInteractionMode === "multi") return;
+        if (desktopMultiSelectKeyDownRef.current) return;
         if (useInspectionStore.getState().active) return;
         await clearViewerSelection();
         return;
@@ -1109,11 +1214,197 @@ export default function ViewerPage() {
           : typeof hit.itemId === "number"
             ? [hit.itemId]
             : [];
+      const isContextPick = hit.button === 2;
+
+      if (isContextPick && typeof hit.clientX === "number" && typeof hit.clientY === "number") {
+        const currentSelectionRefs = selectedAssembly
+          ? analyzerRefsFromAssembly(selectedAssembly)
+          : selectedPart
+            ? [{ id: selectedPart.id, expressId: selectedPart.expressId }]
+            : (profileGroupDetail?.instances.map((p) => ({
+                id: p.id,
+                expressId: p.expressId,
+              })) ?? []);
+
+        if (currentSelectionRefs.length > 0) {
+          const currentSelectionIds = await engine.resolveIsolationLocalIds(currentSelectionRefs);
+          const hitIds = [hit.localId, hit.itemId].filter(
+            (id) => typeof id === "number" && Number.isFinite(id),
+          );
+          if (hitIds.some((id) => currentSelectionIds.has(id))) {
+            setElementContextPanel({
+              clientX: hit.clientX,
+              clientY: hit.clientY,
+              isolationLocalIds: [...currentSelectionIds],
+              showInspect: selectedPart != null && !isAnalyzerBoltRow(selectedPart),
+            });
+            return;
+          }
+        }
+      }
 
       const pickCtx = await engine.resolvePickMatchContext(hit);
       const guidIdx = engine.getAnalyzerGuidIndex();
 
-      if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
+      if (isContextPick) {
+        setElementContextPanel(null);
+        const selectedIds = useMultiSelectStore.getState().selectedLocalIds;
+        if (selectedIds.length > 0) {
+          if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
+            setElementContextPanel({
+              clientX: hit.clientX,
+              clientY: hit.clientY,
+              isolationLocalIds: [...selectedIds],
+              showInspect: false,
+            });
+          }
+          return;
+        }
+
+        const selectedAssemblyMatchesPick =
+          selectedAssembly != null &&
+          (selectedAssembly.parts.some((p) =>
+            analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+          ) ||
+            (selectedAssembly.bolts ?? []).some((b) =>
+              analyzerEntityMatchesPick(b, pickCtx.localIds, pickCtx.guids, guidIdx),
+            ));
+        const selectedPartMatchesPick =
+          selectedPart != null &&
+          analyzerEntityMatchesPick(selectedPart, pickCtx.localIds, pickCtx.guids, guidIdx);
+        const profileSelectionMatchesPick =
+          profileGroupDetail?.instances.some((p) =>
+            analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+          ) ?? false;
+
+        if (
+          typeof hit.clientX === "number" &&
+          typeof hit.clientY === "number" &&
+          (selectedAssemblyMatchesPick || selectedPartMatchesPick || profileSelectionMatchesPick)
+        ) {
+          const refs = selectedAssembly
+            ? analyzerRefsFromAssembly(selectedAssembly)
+            : selectedPart
+              ? [{ id: selectedPart.id, expressId: selectedPart.expressId }]
+              : (profileGroupDetail?.instances.map((p) => ({
+                  id: p.id,
+                  expressId: p.expressId,
+                })) ?? []);
+          const ids = await engine.resolveIsolationLocalIds(refs);
+          setElementContextPanel({
+            clientX: hit.clientX,
+            clientY: hit.clientY,
+            isolationLocalIds: [...ids],
+            showInspect: selectedPartMatchesPick && selectedPart != null && !isAnalyzerBoltRow(selectedPart),
+          });
+          return;
+        }
+
+        if (!analyzerData) {
+          if (highlightIds.length) {
+            await engine.highlightItemIds(highlightIds);
+            if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
+              setElementContextPanel({
+                clientX: hit.clientX,
+                clientY: hit.clientY,
+                isolationLocalIds: highlightIds,
+                showInspect: false,
+              });
+            }
+          }
+          setSelectionStatus(
+            highlightIds.length
+              ? `נבחר פריט IFC ${formatCount(highlightIds[0])} (נתוני ניתוח לא זמינים)`
+              : "נבחרה נקודה במודל (נתוני ניתוח לא זמינים)",
+          );
+          return;
+        }
+
+        if (selectionMode === "assembly" && hasRealIfcAssemblies) {
+          const candidates = analyzerData.assemblies.filter(
+            (a) =>
+              a.expressId != null &&
+              (a.parts.some((p) =>
+                analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+              ) ||
+                (a.bolts ?? []).some((b) =>
+                  analyzerEntityMatchesPick(b, pickCtx.localIds, pickCtx.guids, guidIdx),
+                )),
+          );
+          const assembly = choosePreferredAssemblyForModelPick(candidates);
+          if (assembly) {
+            await selectAssembly(assembly, { focusCamera: false });
+            if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
+              const set = await engine.resolveIsolationLocalIds(analyzerRefsFromAssembly(assembly));
+              setElementContextPanel({
+                clientX: hit.clientX,
+                clientY: hit.clientY,
+                isolationLocalIds: [...set],
+                showInspect: false,
+              });
+            }
+            return;
+          }
+        }
+
+        const contextPart = analyzerData.parts.find((p) =>
+          analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+        );
+
+        if (contextPart) {
+          await selectPart(contextPart, { focusCamera: false });
+          if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
+            const ids = await engine.resolveIsolationLocalIds([
+              { id: contextPart.id, expressId: contextPart.expressId },
+            ]);
+            const showInspect =
+              loadingState === "ready" &&
+              !useInspectionStore.getState().active &&
+              !isAnalyzerBoltRow(contextPart) &&
+              !!contextPart.id &&
+              useIsolationStore.getState().isolationMode === "none";
+            setElementContextPanel({
+              clientX: hit.clientX,
+              clientY: hit.clientY,
+              isolationLocalIds: [...ids],
+              showInspect,
+            });
+          }
+          return;
+        }
+
+        const fallback = [...new Set([...pickCtx.localIds, ...highlightIds])].filter(
+          (n) => typeof n === "number" && Number.isFinite(n),
+        );
+        if (fallback.length) {
+          await engine.highlightItemIds(fallback);
+          if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
+            setElementContextPanel({
+              clientX: hit.clientX,
+              clientY: hit.clientY,
+              isolationLocalIds: fallback,
+              showInspect: false,
+            });
+          }
+        }
+        return;
+      }
+
+      const activePickInteractionMode = useMultiSelectStore.getState().pickInteractionMode;
+      const desktopMultiSelectPick =
+        activePickInteractionMode !== "multi" &&
+        Boolean(hit.ctrlKey || desktopMultiSelectKeyDownRef.current) &&
+        loadingState === "ready" &&
+        viewerTool !== "measurement" &&
+        !markupDrawingEnabled &&
+        !snapshotSessionOpen &&
+        useIsolationStore.getState().isolationMode === "none" &&
+        !useInspectionStore.getState().active;
+
+      if (
+        activePickInteractionMode === "multi" ||
+        desktopMultiSelectPick
+      ) {
         setElementContextPanel(null);
         const toggleAndHighlight = async (
           targetIds: number[],
@@ -1134,6 +1425,60 @@ export default function ViewerPage() {
           await engine.highlightFragmentLocalSet(new Set(sel));
           setSelectionStatus(`בחירה מרובה: ${formatCount(sel.length)} אלמנטים`);
         };
+
+        const seedCurrentDesktopSelection = async () => {
+          if (!desktopMultiSelectPick || useMultiSelectStore.getState().selectedLocalIds.length > 0) {
+            return;
+          }
+          if (selectedAssembly) {
+            const ids = await engine.resolveIsolationLocalIds(analyzerRefsFromAssembly(selectedAssembly));
+            if (ids.size > 0) {
+              useMultiSelectStore.getState().toggleLocalIds([...ids], {
+                key: `assembly:${selectedAssembly.id}`,
+                weightKg: selectedAssembly.weightKg,
+              });
+            }
+            return;
+          }
+          if (selectedPart) {
+            const ids = await engine.resolveIsolationLocalIds([
+              { id: selectedPart.id, expressId: selectedPart.expressId },
+            ]);
+            if (ids.size > 0) {
+              useMultiSelectStore.getState().toggleLocalIds([...ids], {
+                key: `${isAnalyzerBoltRow(selectedPart) ? "bolt" : "part"}:${selectedPart.id}`,
+                weightKg: isAnalyzerBoltRow(selectedPart) ? null : selectedPart.weightKg,
+              });
+            }
+            return;
+          }
+          if (profileGroupDetail?.instances.length) {
+            const refs = profileGroupDetail.instances.map((p) => ({
+              id: p.id,
+              expressId: p.expressId,
+            }));
+            const ids = await engine.resolveIsolationLocalIds(refs);
+            if (ids.size > 0) {
+              const totalWeight = profileGroupDetail.instances.reduce((sum, p) => {
+                const weight = p.weightKg;
+                return weight == null || Number.isNaN(weight) ? sum : sum + weight;
+              }, 0);
+              useMultiSelectStore.getState().toggleLocalIds([...ids], {
+                key: `profile:${profileGroupDetail.profileLabel}`,
+                weightKg: totalWeight,
+              });
+            }
+          }
+        };
+
+        if (desktopMultiSelectPick) {
+          await seedCurrentDesktopSelection();
+          setAssemblyStructureNotice(false);
+          setAssemblyDetailOverride(null);
+          setSelectedAssemblyId(null);
+          setSelectedPartId(null);
+          setProfileGroupDetail(null);
+        }
 
         const pickedSelectedWeightItem = useMultiSelectStore
           .getState()
@@ -1246,15 +1591,6 @@ export default function ViewerPage() {
         const assembly = choosePreferredAssemblyForModelPick(candidates);
         if (assembly) {
           await selectAssembly(assembly, { focusCamera: false });
-          if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
-            const set = await engine.resolveIsolationLocalIds(analyzerRefsFromAssembly(assembly));
-            setElementContextPanel({
-              clientX: hit.clientX,
-              clientY: hit.clientY,
-              isolationLocalIds: [...set],
-              showInspect: false,
-            });
-          }
           return;
         }
       }
@@ -1272,23 +1608,6 @@ export default function ViewerPage() {
       }
 
       await selectPart(part, { focusCamera: false });
-      if (typeof hit.clientX === "number" && typeof hit.clientY === "number") {
-        const ids = await engine.resolveIsolationLocalIds([
-          { id: part.id, expressId: part.expressId },
-        ]);
-        const showInspect =
-          loadingState === "ready" &&
-          !useInspectionStore.getState().active &&
-          !isAnalyzerBoltRow(part) &&
-          !!part.id &&
-          useIsolationStore.getState().isolationMode === "none";
-        setElementContextPanel({
-          clientX: hit.clientX,
-          clientY: hit.clientY,
-          isolationLocalIds: [...ids],
-          showInspect,
-        });
-      }
     });
     return () => engine.setPickCallback(null);
   }, [
@@ -1301,6 +1620,12 @@ export default function ViewerPage() {
     setActiveSheet,
     clearViewerSelection,
     loadingState,
+    markupDrawingEnabled,
+    profileGroupDetail,
+    selectedAssembly,
+    selectedPart,
+    snapshotSessionOpen,
+    viewerTool,
   ]);
 
   const handleMarkupDrawingToggle = useCallback(() => {
@@ -1433,7 +1758,10 @@ export default function ViewerPage() {
   const showFilterPanel = activeSheet === "filter";
 
   return (
-    <main className="relative h-screen w-screen overflow-hidden">
+    <main
+      className="relative h-screen w-screen overflow-hidden"
+      onContextMenu={handleViewerContextMenu}
+    >
       <div className="absolute inset-0 z-0">
         <ViewerCanvas onReady={onReady} />
       </div>
@@ -1470,7 +1798,7 @@ export default function ViewerPage() {
           <span dir="rtl">חזרה</span>
         </Button>
 
-        {!inspectionActive && pickInteractionMode === "multi" && multiSelectedCount > 0 ? (
+        {!inspectionActive && multiSelectedCount > 0 ? (
           <div
             className="pointer-events-none absolute left-1/2 flex -translate-x-1/2 items-center gap-1.5 text-xs font-medium text-zinc-700"
             dir="rtl"
