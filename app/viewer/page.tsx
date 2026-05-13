@@ -27,9 +27,9 @@ import { ViewerEngine, type ApplyIsolationOptions } from "@/lib/viewer/engine";
 import { findAssemblyLabelForPart } from "@/lib/viewer/inspection-assembly";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
-import { he } from "@/lib/i18n/he";
 import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
 import { isAnalyzerBoltRow } from "@/types/domain";
+import { MoveLeft } from "lucide-react";
 import {
   AssemblyPickDetailPanel,
   PartPickDetailPanel,
@@ -1458,8 +1458,14 @@ export default function ViewerPage() {
 
       <ViewerSnapshotToasts copyToastVisible={snapshotCopyToast} />
       <div className="pointer-events-auto absolute left-3 top-3 z-40 safe-top">
-        <Button variant="secondary" size="lg" className="shadow-lg" onClick={() => router.push("/")}>
-          {he.backToUpload}
+        <Button
+          variant="secondary"
+          className="h-8 rounded-full px-3 text-xs font-medium shadow-lg"
+          onClick={() => router.push("/")}
+          dir="ltr"
+        >
+          <MoveLeft className="size-3.5" aria-hidden />
+          <span dir="rtl">חזרה</span>
         </Button>
       </div>
 
