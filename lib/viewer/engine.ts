@@ -2266,6 +2266,10 @@ export class ViewerEngine {
         return;
       }
 
+      if (!hit && pickButton === 2) {
+        return;
+      }
+
       try {
         this.pickCallback(hit);
       } catch (error) {

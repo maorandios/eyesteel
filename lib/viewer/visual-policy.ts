@@ -58,15 +58,13 @@ export const CONTEXT_GHOST_SNAPSHOT_NAME = "eyeSteel-context-ghost-snapshot";
 /** Context (non-isolated) faces + matching sketch-edge opacity in "הצג בהקשר" (~2%). */
 export const CONTEXT_GHOST_FACE_OPACITY = 0.02;
 
-/**
- * Slight luma lift + translucency reads as a soft glow against the shaded model without extra passes.
- */
+/** Single opaque selected-element blue used by normal pick and Ctrl multi-pick. */
 export function buildSelectionHighlightMaterial(): MaterialDefinition {
   const color = SELECTION_HIGHLIGHT_COLOR.clone().lerp(new THREE.Color(0xffffff), 0.1);
   return {
     color,
-    opacity: 0.85,
-    transparent: true,
+    opacity: 1,
+    transparent: false,
     depthWrite: true,
     renderedFaces: 0,
   };

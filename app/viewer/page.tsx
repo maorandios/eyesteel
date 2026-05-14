@@ -800,9 +800,16 @@ export default function ViewerPage() {
     [engine, setOrthographicView],
   );
 
+  const resolveActiveIsolationLocalIds = useCallback(async () => {
+    if (!engine) return new Set<number>();
+    const ids = await engine.resolveIsolationLocalIds(isolationRefs);
+    if (ids.size > 0) return ids;
+    return new Set(useMultiSelectStore.getState().selectedLocalIds);
+  }, [engine, isolationRefs]);
+
   const handleIsolationIsolate = useCallback(async () => {
     if (!engine) return;
-    const ids = await engine.resolveIsolationLocalIds(isolationRefs);
+    const ids = await resolveActiveIsolationLocalIds();
     if (ids.size === 0) {
       return;
     }
@@ -811,11 +818,11 @@ export default function ViewerPage() {
       focus: false,
     });
     if (ok) useIsolationStore.getState().setIsolation("isolated", [...ids]);
-  }, [engine, isolationApplyOpts, isolationRefs]);
+  }, [engine, isolationApplyOpts, resolveActiveIsolationLocalIds]);
 
   const handleIsolationContext = useCallback(async () => {
     if (!engine) return;
-    const ids = await engine.resolveIsolationLocalIds(isolationRefs);
+    const ids = await resolveActiveIsolationLocalIds();
     if (ids.size === 0) {
       return;
     }
@@ -824,11 +831,11 @@ export default function ViewerPage() {
       focus: false,
     });
     if (ok) useIsolationStore.getState().setIsolation("context", [...ids]);
-  }, [engine, isolationApplyOpts, isolationRefs]);
+  }, [engine, isolationApplyOpts, resolveActiveIsolationLocalIds]);
 
   const handleIsolationHide = useCallback(async () => {
     if (!engine) return;
-    const ids = await engine.resolveIsolationLocalIds(isolationRefs);
+    const ids = await resolveActiveIsolationLocalIds();
     if (ids.size === 0) {
       return;
     }
@@ -837,7 +844,7 @@ export default function ViewerPage() {
       focus: false,
     });
     if (ok) useIsolationStore.getState().setIsolation("hidden", [...ids]);
-  }, [engine, isolationApplyOpts, isolationRefs]);
+  }, [engine, isolationApplyOpts, resolveActiveIsolationLocalIds]);
 
   /** Same visual reset as “הצג הכל” — used from בחירה מרובה submenuאיפוס/X without requiring the isolation bar. */
   const restoreFullModelIsolationState = useCallback(async () => {
@@ -941,6 +948,8 @@ export default function ViewerPage() {
       event.preventDefault();
       event.stopPropagation();
 
+      if (isolationMode !== "none") return;
+
       const ids = useMultiSelectStore.getState().selectedLocalIds;
       if (ids.length === 0) return;
 
@@ -951,7 +960,14 @@ export default function ViewerPage() {
         showInspect: false,
       });
     },
-    [inspectionActive, loadingState, markupDrawingEnabled, snapshotSessionOpen, viewerTool],
+    [
+      inspectionActive,
+      isolationMode,
+      loadingState,
+      markupDrawingEnabled,
+      snapshotSessionOpen,
+      viewerTool,
+    ],
   );
 
   const handleElementPanelIsolate = useCallback(
@@ -1196,12 +1212,22 @@ export default function ViewerPage() {
   useEffect(() => {
     if (!engine) return;
     engine.setPickCallback(async (hit) => {
+      if (useIsolationStore.getState().isolationMode !== "none") {
+        return;
+      }
+
       if (!hit) {
         /**
-         * Empty-canvas tap: clear the current selection so users can deselect by clicking away.
-         * In "בחירה מרובה" we keep the running set so accidental misses don't wipe it.
+         * Empty-canvas tap: clear normal selections only. In "בחירה מרובה" and Ctrl multi-select,
+         * keep the running set so accidental misses don't wipe it; reset is available in the bottom HUD.
          */
-        if (useMultiSelectStore.getState().pickInteractionMode === "multi") return;
+        const multiSelectState = useMultiSelectStore.getState();
+        if (
+          multiSelectState.pickInteractionMode === "multi" ||
+          multiSelectState.selectedLocalIds.length > 0
+        ) {
+          return;
+        }
         if (desktopMultiSelectKeyDownRef.current) return;
         if (useInspectionStore.getState().active) return;
         await clearViewerSelection();
