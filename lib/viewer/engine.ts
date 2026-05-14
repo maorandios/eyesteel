@@ -115,7 +115,7 @@ export type ApplyIsolationOptions = {
   inspectionReadableSketch?: boolean;
 };
 
-export type ViewerToolMode = "none" | "measurement";
+export type ViewerToolMode = "none" | "measurement" | "flash";
 
 /** Tap classification — fingers jitter more than mouse cursors. */
 const TAP_SLOP_SQ_MOUSE = 144;
@@ -1982,6 +1982,41 @@ export class ViewerEngine {
 
   setPickCallback(cb: ((hit: PickHit | null) => void) | null) {
     this.pickCallback = cb;
+  }
+
+  async pickAtClientPoint(clientX: number, clientY: number): Promise<PickHit | null> {
+    if (this.disposed || this.isInspectionVisualizationSessionActive()) return null;
+    const canvas = this.world.renderer?.three?.domElement as HTMLCanvasElement | undefined;
+    const camera = this.world.camera;
+    if (!canvas || !camera?.three) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    if (clientX < rect.left || clientX >= rect.right || clientY < rect.top || clientY >= rect.bottom) {
+      return null;
+    }
+
+    const mouse = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1,
+    );
+
+    try {
+      const pickers = this.components.get(OBC.FastModelPickers);
+      const picker = pickers.get(this.world);
+      const full = await picker.getFullPick(mouse);
+      if (!full || typeof full.localId !== "number") return null;
+      return {
+        localId: full.localId,
+        itemId: full.itemId,
+        clientX,
+        clientY,
+        button: 0,
+        ctrlKey: false,
+      };
+    } catch {
+      return null;
+    }
   }
 
   setPickPriorityLocalIds(

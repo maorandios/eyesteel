@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 
-export type ViewerToolId = "none" | "measurement";
+export type ViewerToolId = "none" | "measurement" | "flash";
 
 interface ViewerToolState {
   activeTool: ViewerToolId;

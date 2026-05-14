@@ -46,6 +46,7 @@ import {
   SquaresIntersect,
   SquaresSubtract,
   SquaresUnite,
+  Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { IsolationMode } from "@/lib/state/isolation-store";
@@ -149,6 +150,9 @@ interface Props {
   onMeasurementToggle: () => void;
   onMeasurementClear: () => void;
   onMeasurementFinish: () => void;
+  flashActive?: boolean;
+  flashDisabled?: boolean;
+  onFlashToggle?: () => void;
   onApplyViewMode: (mode: ViewModeId) => void;
   /** Current orthographic preset (for sub-menu highlight); omit when not in a preset. */
   activeViewMode?: ViewModeId;
@@ -215,6 +219,9 @@ export function ViewerBottomDock({
   onMeasurementToggle,
   onMeasurementClear,
   onMeasurementFinish,
+  flashActive = false,
+  flashDisabled = false,
+  onFlashToggle,
   onApplyViewMode,
   activeViewMode,
   appliedViewMode,
@@ -612,6 +619,25 @@ export function ViewerBottomDock({
         {onGlobalSearch && (
           <DockPillButton label="חיפוש" title="חיפוש במודל" aria-label="חיפוש" onClick={onGlobalSearch}>
             <Search aria-hidden />
+          </DockPillButton>
+        )}
+
+        {onFlashToggle && (
+          <DockPillButton
+            label="הבזק"
+            aria-pressed={flashActive}
+            disabled={flashDisabled}
+            submenuOpen={flashActive && !flashDisabled}
+            labelClassName={flashActive && !flashDisabled ? "text-zinc-900" : undefined}
+            title={
+              flashDisabled
+                ? "אינו זמין לפני טעינת המודל או בזמן מדידה/סימון"
+                : "הבזק — הצגת נתונים כלליים בריחוף על אלמנטים"
+            }
+            aria-label="הבזק"
+            onClick={onFlashToggle}
+          >
+            <Zap aria-hidden />
           </DockPillButton>
         )}
 

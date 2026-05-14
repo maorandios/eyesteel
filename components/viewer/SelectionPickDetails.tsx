@@ -75,7 +75,7 @@ export function countSteelPartsMatchingIdentity(
 }
 
 /** שם חלק — ללא שם when missing or IFC "Unnamed". */
-function displayPartIfcName(p: AnalyzerPart): string {
+export function displayPartIfcName(p: AnalyzerPart): string {
   const n = (p.name || "").trim();
   if (!n || n.toLowerCase() === "unnamed") return "ללא שם";
   return n;
@@ -89,7 +89,7 @@ function looksLikeBogusIfcProfileString(raw: string): boolean {
 }
 
 /** Profile shown in חלקים שייכים — Tekla profile string, or ללא שם when missing / Unnamed. */
-function displayPartProfileCell(p: AnalyzerPart): string {
+export function displayPartProfileCell(p: AnalyzerPart): string {
   const prof = (p.profile || "").trim();
   if (prof.length > 0 && !looksLikeBogusIfcProfileString(prof)) {
     const pl = prof.toLowerCase();
@@ -568,8 +568,7 @@ export function PartPickDetailPanel({
       { label: "אורך (מ״מ)", value: <span dir="ltr">{formatMmPlain(b.boltLengthMm)}</span> },
       { label: "תקן", value: b.boltStandard || EM_DASH },
       { label: "קוטר חור (מ״מ)", value: <span dir="ltr">{formatMmPlain(b.boltHoleDiameterMm)}</span> },
-      { label: "כמות (ישות IFC)", value: formatQuantityInt(b.boltQty) },
-      { label: "סוג IFC", value: b.ifcType || EM_DASH },
+      { label: "כמות", value: formatQuantityInt(b.boltQty) },
     ];
     return (
       <div className="space-y-9" dir="rtl">

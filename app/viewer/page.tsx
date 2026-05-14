@@ -26,16 +26,19 @@ import {
 import { ViewerEngine, type ApplyIsolationOptions } from "@/lib/viewer/engine";
 import type { ViewModeId } from "@/lib/viewer/view-mode-presets";
 import type { ClippingDirectionId } from "@/lib/viewer/clipping-presets";
-import type { AnalyzerAssembly, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
+import type { AnalyzerAssembly, AnalyzerBoltRow, AnalyzerIndexedEntity, AnalyzerPart } from "@/types/domain";
 import { isAnalyzerBoltRow } from "@/types/domain";
-import { LayoutList, MoveLeft, SquaresIntersect, SquaresUnite, X } from "lucide-react";
+import { Bolt, LayoutList, MoveLeft, SquaresIntersect, SquaresUnite, X } from "lucide-react";
 import {
   AssemblyPickDetailPanel,
   PartPickDetailPanel,
   ProfileGroupPickDetailPanel,
   aggregateProfilesForModelTab,
   aggregateSteelPartsForModelTab,
+  countSteelPartsMatchingIdentity,
+  displayPartIfcName,
   displayPartMark,
+  displayPartProfileCell,
   type AggregatedProfileTabRow,
 } from "@/components/viewer/SelectionPickDetails";
 import {
@@ -53,7 +56,7 @@ import { ViewFilterPanel } from "@/components/viewer/ViewFilterPanel";
 import { useViewFilterSync } from "@/hooks/use-view-filter-sync";
 import { useViewFilterStore } from "@/lib/state/view-filter-store";
 import { resolveViewFilterHiddenLocals } from "@/lib/viewer/view-filter-resolve";
-import { formatCount, formatKgPlain, formatQuantityInt } from "@/lib/format-numbers";
+import { formatCount, formatElevationMm, formatKgPlain, formatMmPlain, formatQuantityInt } from "@/lib/format-numbers";
 import {
   analyzerEntityMatchesPick,
   analyzerRefsFromAssembly,
@@ -68,6 +71,8 @@ import {
 import {
   aggregateAssembliesByMark,
   choosePreferredAssemblyForModelPick,
+  countAssemblyOccurrencesInModel,
+  displayAssemblyMark,
   type AggregatedAssemblyRow,
 } from "@/lib/viewer/modelAggregates";
 
@@ -89,9 +94,63 @@ const VIEWER_BOTTOM_STRIP_RESERVE = "bottom-[calc(3.75rem+env(safe-area-inset-bo
 
 type SelectionMode = "part" | "assembly";
 type ModelDataTab = "assemblies" | "parts" | "profiles";
+type FlashTooltipRow = { label: string; value: string };
+type FlashTooltipState = {
+  x: number;
+  y: number;
+  kind: "assembly" | "part" | "bolt";
+  title: string;
+  rows: FlashTooltipRow[];
+};
 
 function multiSelectFallbackWeightKey(ids: readonly number[]): string {
   return `local:${[...new Set(ids)].filter(Number.isFinite).sort((a, b) => a - b).join(",")}`;
+}
+
+function flashTooltipPosition(clientX: number, clientY: number): { x: number; y: number } {
+  const width = 280;
+  const height = 260;
+  const pad = 12;
+  const x = Math.min(Math.max(clientX + 16, pad), Math.max(pad, window.innerWidth - width - pad));
+  const y = Math.min(Math.max(clientY + 16, pad), Math.max(pad, window.innerHeight - height - pad));
+  return { x, y };
+}
+
+function assemblyFlashRows(
+  assembly: AnalyzerAssembly,
+  allAssemblies: AnalyzerAssembly[],
+): FlashTooltipRow[] {
+  return [
+    { label: "מספר אסמבלי", value: assembly.assemblyMark || "—" },
+    { label: "שם אסמבלי", value: assembly.name || assembly.tag || "—" },
+    { label: 'משקל כולל (ק״ג)', value: formatKgPlain(assembly.weightKg) },
+    { label: "גובה עליון", value: formatElevationMm(assembly.topElevation) },
+    { label: "גובה תחתון", value: formatElevationMm(assembly.bottomElevation) },
+    { label: "כמות במודל", value: formatCount(countAssemblyOccurrencesInModel(assembly, allAssemblies)) },
+  ];
+}
+
+function partFlashRows(part: AnalyzerPart, allSteelParts: AnalyzerPart[]): FlashTooltipRow[] {
+  const modelCount = allSteelParts.length > 0 ? countSteelPartsMatchingIdentity(part, allSteelParts) : null;
+  return [
+    { label: "מספר חלק", value: displayPartMark(part) },
+    { label: "פרופיל", value: displayPartProfileCell(part) },
+    { label: "שם חלק", value: displayPartIfcName(part) },
+    { label: "חומר", value: part.material || "—" },
+    { label: "כמות", value: modelCount != null ? formatCount(modelCount) : "—" },
+    { label: "גובה עליון", value: formatElevationMm(part.topElevation ?? null) },
+    { label: "גובה תחתון", value: formatElevationMm(part.bottomElevation ?? null) },
+  ];
+}
+
+function boltFlashRows(bolt: AnalyzerBoltRow): FlashTooltipRow[] {
+  return [
+    { label: "שם הבורג", value: bolt.boltName || bolt.name || "—" },
+    { label: "אורך (מ״מ)", value: formatMmPlain(bolt.boltLengthMm) },
+    { label: "תקן", value: bolt.boltStandard || "—" },
+    { label: "קוטר חור (מ״מ)", value: formatMmPlain(bolt.boltHoleDiameterMm) },
+    { label: "כמות", value: formatQuantityInt(bolt.boltQty) },
+  ];
 }
 
 export default function ViewerPage() {
@@ -117,6 +176,7 @@ export default function ViewerPage() {
   const [elementContextPanel, setElementContextPanel] = useState<ElementPickContextPanelState | null>(
     null,
   );
+  const [flashTooltip, setFlashTooltip] = useState<FlashTooltipState | null>(null);
   const desktopMultiSelectKeyDownRef = useRef(false);
   const [snapshotCapturePending, setSnapshotCapturePending] = useState(false);
   const snapshotBlobRef = useRef<Blob | null>(null);
@@ -313,12 +373,16 @@ export default function ViewerPage() {
     if (viewerTool !== "measurement") {
       useSmartMeasureStore.getState().clearBreakdown();
     }
+    if (viewerTool !== "flash") {
+      setFlashTooltip(null);
+    }
   }, [viewerTool]);
 
   const toggleMeasurementTool = useCallback(() => {
     if (viewerTool !== "measurement") {
       setMarkupDrawingEnabled(false);
       setElementContextPanel(null);
+      setFlashTooltip(null);
       if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
         useMultiSelectStore.getState().exitMultiSelectSession();
         void engine?.highlightFragmentLocalSet(new Set());
@@ -330,6 +394,21 @@ export default function ViewerPage() {
   const finishMeasurementTool = useCallback(() => {
     setViewerTool("none");
   }, [setViewerTool]);
+
+  const toggleFlashTool = useCallback(() => {
+    const next = viewerTool === "flash" ? "none" : "flash";
+    if (next === "flash") {
+      setMarkupDrawingEnabled(false);
+      setElementContextPanel(null);
+      if (useMultiSelectStore.getState().pickInteractionMode === "multi") {
+        useMultiSelectStore.getState().exitMultiSelectSession();
+        void engine?.highlightFragmentLocalSet(new Set());
+      }
+    } else {
+      setFlashTooltip(null);
+    }
+    setViewerTool(next);
+  }, [engine, setViewerTool, viewerTool]);
 
   const handleApplyViewMode = useCallback(
     (mode: ViewModeId) => {
@@ -1480,6 +1559,154 @@ export default function ViewerPage() {
     viewerTool,
   ]);
 
+  useEffect(() => {
+    if (
+      !engine ||
+      !analyzerData ||
+      loadingState !== "ready" ||
+      viewerTool !== "flash" ||
+      snapshotSessionOpen ||
+      markupDrawingEnabled
+    ) {
+      setFlashTooltip(null);
+      return;
+    }
+
+    let disposed = false;
+    let timer: number | null = null;
+    let requestSeq = 0;
+    let latestEvent: PointerEvent | null = null;
+
+    const clearTimer = () => {
+      if (timer != null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const clearTooltip = () => {
+      clearTimer();
+      latestEvent = null;
+      requestSeq += 1;
+      setFlashTooltip(null);
+    };
+
+    const resolveHover = async (event: PointerEvent, seq: number) => {
+      const hit = await engine.pickAtClientPoint(event.clientX, event.clientY);
+      if (disposed || seq !== requestSeq) return;
+      if (!hit) {
+        setFlashTooltip(null);
+        return;
+      }
+
+      const pickCtx = await engine.resolvePickMatchContext(hit);
+      if (disposed || seq !== requestSeq) return;
+      const guidIdx = engine.getAnalyzerGuidIndex();
+      const { x, y } = flashTooltipPosition(event.clientX, event.clientY);
+
+      if (selectionMode === "assembly" && hasRealIfcAssemblies) {
+        const candidates = analyzerData.assemblies.filter(
+          (a) =>
+            a.expressId != null &&
+            (a.parts.some((p) =>
+              analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+            ) ||
+              (a.bolts ?? []).some((b) =>
+                analyzerEntityMatchesPick(b, pickCtx.localIds, pickCtx.guids, guidIdx),
+              )),
+        );
+        const assembly = choosePreferredAssemblyForModelPick(candidates);
+        if (assembly) {
+          setFlashTooltip({
+            x,
+            y,
+            kind: "assembly",
+            title: displayAssemblyMark(assembly),
+            rows: assemblyFlashRows(assembly, analyzerData.assemblies),
+          });
+          return;
+        }
+      }
+
+      const part = analyzerData.parts.find(
+        (p): p is AnalyzerPart =>
+          !isAnalyzerBoltRow(p) &&
+          analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+      );
+      if (part) {
+        setFlashTooltip({
+          x,
+          y,
+          kind: "part",
+          title: displayPartMark(part),
+          rows: partFlashRows(part, steelPartsAll),
+        });
+        return;
+      }
+
+      const bolt = analyzerData.parts.find(
+        (p): p is AnalyzerBoltRow =>
+          isAnalyzerBoltRow(p) &&
+          analyzerEntityMatchesPick(p, pickCtx.localIds, pickCtx.guids, guidIdx),
+      );
+      if (!bolt) {
+        setFlashTooltip(null);
+        return;
+      }
+
+      setFlashTooltip({
+        x,
+        y,
+        kind: "bolt",
+        title: bolt.boltName || bolt.name || "בורג",
+        rows: boltFlashRows(bolt),
+      });
+      return;
+    };
+
+    const scheduleHover = (event: PointerEvent) => {
+      if (event.pointerType && event.pointerType !== "mouse") {
+        clearTooltip();
+        return;
+      }
+      const target = event.target;
+      if (target instanceof Element && target.closest(VIEWER_CONTEXT_MENU_EXCLUDED_SELECTOR)) {
+        clearTooltip();
+        return;
+      }
+
+      latestEvent = event;
+      clearTimer();
+      timer = window.setTimeout(() => {
+        timer = null;
+        const current = latestEvent;
+        if (!current) return;
+        const seq = ++requestSeq;
+        void resolveHover(current, seq);
+      }, 80);
+    };
+
+    window.addEventListener("pointermove", scheduleHover, { passive: true });
+    window.addEventListener("pointerleave", clearTooltip);
+    return () => {
+      disposed = true;
+      clearTimer();
+      window.removeEventListener("pointermove", scheduleHover);
+      window.removeEventListener("pointerleave", clearTooltip);
+      setFlashTooltip(null);
+    };
+  }, [
+    analyzerData,
+    engine,
+    hasRealIfcAssemblies,
+    loadingState,
+    markupDrawingEnabled,
+    selectionMode,
+    snapshotSessionOpen,
+    steelPartsAll,
+    viewerTool,
+  ]);
+
   const handleMarkupDrawingToggle = useCallback(() => {
     setMarkupDrawingEnabled((prev) => {
       const next = !prev;
@@ -1487,6 +1714,10 @@ export default function ViewerPage() {
         setElementContextPanel(null);
         if (viewerTool === "measurement") {
           setViewerTool("none");
+        }
+        if (viewerTool === "flash") {
+          setViewerTool("none");
+          setFlashTooltip(null);
         }
         if (useAppStore.getState().sketchModeEnabled) {
           useAppStore.setState({ sketchModeEnabled: false });
@@ -1693,6 +1924,7 @@ export default function ViewerPage() {
       {elementContextPanel &&
         !snapshotSessionOpen &&
         viewerTool !== "measurement" &&
+        viewerTool !== "flash" &&
         pickInteractionMode !== "multi" &&
         !markupDrawingEnabled && (
           <ElementPickContextPanel
@@ -1702,6 +1934,41 @@ export default function ViewerPage() {
             onHide={() => void handleElementPanelHide(elementContextPanel)}
           />
         )}
+
+      {flashTooltip && viewerTool === "flash" && !snapshotSessionOpen && !markupDrawingEnabled ? (
+        <div
+          className="pointer-events-none fixed z-[55] w-[17.5rem] rounded-2xl border border-zinc-300/90 bg-white/95 p-3 text-zinc-800 shadow-[0_18px_45px_rgba(39,39,42,0.22)] ring-1 ring-white/70 backdrop-blur-md"
+          style={{ left: flashTooltip.x, top: flashTooltip.y }}
+          dir="rtl"
+          role="tooltip"
+        >
+          <div className="mb-2 flex items-center justify-between gap-3 border-b border-zinc-200 pb-2">
+            <div>
+              <p className="inline-flex items-center gap-1.5 text-[10px] font-bold text-[#003CFF]">
+                {flashTooltip.kind === "assembly" ? (
+                  <SquaresUnite className="size-3.5" aria-hidden />
+                ) : flashTooltip.kind === "bolt" ? (
+                  <Bolt className="size-3.5" aria-hidden />
+                ) : (
+                  <SquaresIntersect className="size-3.5" aria-hidden />
+                )}
+                {flashTooltip.kind === "assembly" ? "אסמבלי" : flashTooltip.kind === "bolt" ? "בורג" : "חלק"}
+              </p>
+              <p className="mt-0.5 truncate text-sm font-bold text-zinc-950">{flashTooltip.title}</p>
+            </div>
+          </div>
+          <dl className="space-y-1.5 text-[11px]">
+            {flashTooltip.rows.map((row) => (
+              <div key={row.label} className="flex items-start justify-between gap-3">
+                <dt className="shrink-0 font-semibold text-zinc-500">{row.label}</dt>
+                <dd className="min-w-0 truncate text-left font-semibold text-zinc-900" dir="auto">
+                  {row.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ) : null}
 
       <ViewerBottomDock
         selectionMode={selectionMode}
@@ -1738,6 +2005,14 @@ export default function ViewerPage() {
         onMeasurementToggle={toggleMeasurementTool}
         onMeasurementClear={() => engine?.clearMeasurements()}
         onMeasurementFinish={finishMeasurementTool}
+        flashActive={viewerTool === "flash"}
+        flashDisabled={
+          loadingState !== "ready" ||
+          viewerTool === "measurement" ||
+          markupDrawingEnabled ||
+          !analyzerData
+        }
+        onFlashToggle={loadingState === "ready" && analyzerData ? toggleFlashTool : undefined}
         onApplyViewMode={handleApplyViewMode}
         activeViewMode={viewMode === "none" ? undefined : viewMode}
         appliedViewMode={viewMode === "none" ? undefined : viewMode}
@@ -1772,6 +2047,7 @@ export default function ViewerPage() {
         multiSelectEnterDisabled={
           loadingState !== "ready" ||
           viewerTool === "measurement" ||
+          viewerTool === "flash" ||
           markupDrawingEnabled
         }
         multiSelectIsolationBlocksEnter={false}
@@ -1780,7 +2056,7 @@ export default function ViewerPage() {
           loadingState === "ready"
             ? {
                 selectedCount: multiSelectedCount,
-                disabled: !engine || viewerTool === "measurement",
+                disabled: !engine || viewerTool === "measurement" || viewerTool === "flash",
                 onIsolate: () => void handleMultiIsolate(),
                 onContext: () => void handleMultiContext(),
                 onHide: () => void handleMultiHide(),
@@ -1797,7 +2073,7 @@ export default function ViewerPage() {
           !markupDrawingEnabled
             ? {
                 isolationMode,
-                disabled: !engine || viewerTool === "measurement",
+                disabled: !engine || viewerTool === "measurement" || viewerTool === "flash",
                 onIsolate: () => void handleIsolationIsolate(),
                 onContext: () => void handleIsolationContext(),
                 onHide: () => void handleIsolationHide(),
@@ -1807,7 +2083,7 @@ export default function ViewerPage() {
         }
         onMultiSelectEnter={handleEnterMultiSelect}
         markupDrawingActive={markupDrawingEnabled}
-        markupDrawingDisabled={loadingState !== "ready" || viewerTool === "measurement"}
+        markupDrawingDisabled={loadingState !== "ready" || viewerTool === "measurement" || viewerTool === "flash"}
         onMarkupDrawingToggle={
           loadingState === "ready" ? handleMarkupDrawingToggle : undefined
         }

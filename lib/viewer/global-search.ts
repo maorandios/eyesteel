@@ -152,7 +152,6 @@ function profileRowHaystack(row: AggregatedProfileTabRow): string {
 }
 
 const MAX_ASSEMBLY = 22;
-const MAX_PART = 32;
 const MAX_PROFILE = 14;
 
 /**
@@ -219,15 +218,16 @@ export function computeGlobalSearchHits(
   const assemblySlice: GlobalSearchHit[] = assemblyHits.slice(0, MAX_ASSEMBLY);
 
   const partHits: Extract<GlobalSearchHit, { kind: "part" }>[] = [];
+  const boltHits: Extract<GlobalSearchHit, { kind: "part" }>[] = [];
   for (const part of indexedParts) {
-    const r = isAnalyzerBoltRow(part)
-      ? boltSearchRank(part, q)
-      : steelPartSearchRank(part, q, intent);
+    const isBolt = isAnalyzerBoltRow(part);
+    const r = isBolt ? boltSearchRank(part, q) : steelPartSearchRank(part, q, intent);
     if (r < 0) continue;
-    partHits.push({ kind: "part", part, rank: r });
+    if (isBolt) boltHits.push({ kind: "part", part, rank: r });
+    else partHits.push({ kind: "part", part, rank: r });
   }
   partHits.sort((a, b) => a.rank - b.rank || a.part.id.localeCompare(b.part.id));
-  const partSlice: GlobalSearchHit[] = partHits.slice(0, MAX_PART);
+  boltHits.sort((a, b) => a.rank - b.rank || a.part.id.localeCompare(b.part.id));
 
   const profileHits: Extract<GlobalSearchHit, { kind: "profile" }>[] = [];
   for (const row of profileRows) {
@@ -240,5 +240,7 @@ export function computeGlobalSearchHits(
   const profileSlice: GlobalSearchHit[] = profileHits.slice(0, MAX_PROFILE);
 
   // Keep categories separate: a global cap was dropping פרופיל rows when many חלקים matched the same type (e.g. HEB280).
-  return [...assemblySlice, ...partSlice, ...profileSlice];
+  // Parts and bolts are intentionally returned uncapped here because the search overlay merges raw entities
+  // into visible type rows; capping first would hide valid duplicate members from the merged result.
+  return [...assemblySlice, ...partHits, ...boltHits, ...profileSlice];
 }
