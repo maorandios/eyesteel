@@ -587,31 +587,20 @@ export default function ViewerPage() {
 
   const productionAssemblyRows = useMemo(() => {
     const q = productionSearch.trim().toLowerCase();
-    const list = analyzerData?.assemblies ?? [];
-    const filtered = q
-      ? list.filter(
-          (a) =>
-            (a.assemblyMark || "").toLowerCase().includes(q) ||
-            (a.name || "").toLowerCase().includes(q) ||
-            (a.tag || "").toLowerCase().includes(q) ||
-            (a.positionCode || "").toLowerCase().includes(q),
-        )
-      : list;
-    return aggregateAssembliesByMark(filtered);
+    const rows = aggregateAssembliesByMark(analyzerData?.assemblies ?? []);
+    if (!q) return rows;
+    return rows.filter((row) => row.displayMark.toLowerCase().includes(q));
   }, [analyzerData?.assemblies, productionSearch]);
 
   const productionPartRows = useMemo(() => {
     const q = productionSearch.trim().toLowerCase();
-    const filtered = q
-      ? steelPartsAll.filter(
-          (p) =>
-            (p.tag || "").toLowerCase().includes(q) ||
-            (p.partMark || "").toLowerCase().includes(q) ||
-            (p.name || "").toLowerCase().includes(q) ||
-            (p.profile || "").toLowerCase().includes(q),
-        )
-      : steelPartsAll;
-    return aggregateSteelPartsForModelTab(filtered);
+    const rows = aggregateSteelPartsForModelTab(steelPartsAll);
+    if (!q) return rows;
+    return rows.filter(
+      (row) =>
+        row.displayMark.toLowerCase().includes(q) ||
+        row.displayProfile.toLowerCase().includes(q),
+    );
   }, [productionSearch, steelPartsAll]);
 
   const selectedAssembly = useMemo(() => {
@@ -2154,6 +2143,7 @@ export default function ViewerPage() {
       <ViewerBottomDock
         appMode={appMode}
         onAppModeChange={handleAppModeChange}
+        modeSwitcherOnly={appMode === "production" && !productionViewerOpen}
         selectionMode={selectionMode}
         onSelectionModeChange={handleDockSelectionMode}
         onDashboard={toggleDashboardSheet}

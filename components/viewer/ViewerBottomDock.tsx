@@ -139,6 +139,7 @@ function ViewPresetIcon({
 interface Props {
   appMode?: AppMode;
   onAppModeChange?: (mode: AppMode) => void;
+  modeSwitcherOnly?: boolean;
   selectionMode: SelectionMode;
   onSelectionModeChange: (mode: SelectionMode) => void;
   onDashboard: () => void;
@@ -213,6 +214,7 @@ interface Props {
 export function ViewerBottomDock({
   appMode = "management",
   onAppModeChange,
+  modeSwitcherOnly = false,
   selectionMode,
   onSelectionModeChange,
   onDashboard,
@@ -682,6 +684,8 @@ export function ViewerBottomDock({
           </DockPillButton>
         )}
 
+        {!modeSwitcherOnly ? (
+          <>
         {onGlobalSearch && (
           <DockPillButton label="חיפוש" title="חיפוש במודל" aria-label="חיפוש" onClick={onGlobalSearch}>
             <Search aria-hidden />
@@ -962,6 +966,8 @@ export function ViewerBottomDock({
             <Camera aria-hidden />
           </DockPillButton>
         )}
+          </>
+        ) : null}
       </div>
     </div>
   );

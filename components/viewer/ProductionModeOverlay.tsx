@@ -8,6 +8,7 @@ import { displayPartMark } from "@/components/viewer/SelectionPickDetails";
 import type { AggregatedAssemblyRow } from "@/lib/viewer/modelAggregates";
 import {
   ArrowRight,
+  Minimize,
   MoveLeft,
   Search,
   SquareStack,
@@ -58,9 +59,9 @@ function assemblyUnitWeightKg(row: AggregatedAssemblyRow): number | null {
   return row.totalWeightKg / row.qty;
 }
 
-function rowLengthLabel(row: ProductionPartRow): string {
-  const firstLength = row.instances.find((part) => part.lengthMm != null)?.lengthMm ?? null;
-  return formatMmPlain(firstLength);
+function partUnitWeightKg(row: ProductionPartRow): number | null {
+  if (row.totalWeightKg == null || row.effectiveQty <= 0) return null;
+  return row.totalWeightKg / row.effectiveQty;
 }
 
 function ProductionListEmpty({ label }: { label: string }) {
@@ -132,7 +133,7 @@ export function ProductionModeOverlay({
               value={search}
               onChange={(event) => onSearchChange(event.target.value)}
               className="h-12 w-full rounded-xl border-0 bg-white/90 pr-11 pl-4 text-sm font-medium text-zinc-950 outline-none transition placeholder:text-zinc-400 focus:ring-4 focus:ring-[#003CFF]/10"
-              placeholder="חפש לפי מספר אמסבלי"
+              placeholder={tab === "assemblies" ? "חפש לפי מספר אמסבלי" : "חפש לפי מספר חלק"}
               autoComplete="off"
             />
           </label>
@@ -181,29 +182,47 @@ export function ProductionModeOverlay({
             ) : partRows.length === 0 ? (
               <ProductionListEmpty label={loading ? "טוען נתונים..." : "לא נמצאו Parts"} />
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-2">
                 {partRows.map((row) => (
                   <button
                     key={row.key}
                     type="button"
-                    className="grid w-full grid-cols-[1fr_auto] items-center gap-3 rounded-2xl bg-white/85 p-3 text-right transition hover:bg-white active:scale-[0.995]"
+                    className="grid min-h-[6.875rem] w-full grid-cols-[auto_1fr_auto] items-center gap-4 rounded-2xl bg-white/40 p-4 text-right transition hover:bg-white/60 active:scale-[0.995]"
                     onClick={() => onPickPart(row)}
                   >
+                    <span className="flex w-16 shrink-0 flex-col items-center justify-center text-[#003CFF]">
+                      <SquaresIntersect className="size-5" aria-hidden />
+                      <span className="mt-1 text-[10px] font-bold leading-none">חלק</span>
+                    </span>
                     <div className="min-w-0">
                       <p className="truncate text-xl font-bold tracking-tight text-zinc-950" dir="ltr">
                         {row.displayMark}
                       </p>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-zinc-500">
-                        <span dir="ltr">{row.displayProfile}</span>
-                        <span className="text-zinc-300">·</span>
-                        <span dir="ltr">{rowLengthLabel(row)}</span>
-                        <span className="text-zinc-300">·</span>
-                        <span>{formatQuantityInt(row.effectiveQty)} יח׳</span>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs font-medium text-zinc-600">
+                        <span className="flex items-center gap-1.5">
+                          <Minimize className="size-3.5 text-zinc-600" aria-hidden />
+                          <span>פרופיל</span>
+                          <span className="font-bold text-zinc-950" dir="ltr">
+                            {row.displayProfile}
+                          </span>
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <SquareStack className="size-3.5 text-zinc-600" aria-hidden />
+                          <span>כמות לייצור</span>
+                          <span className="font-bold text-zinc-950">
+                            {formatQuantityInt(row.effectiveQty)}
+                          </span>
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <Weight className="size-3.5 text-zinc-600" aria-hidden />
+                          <span>משקל ליחידה (ק&quot;ג)</span>
+                          <span className="font-bold text-zinc-950" dir="ltr">
+                            {formatKgPlain(partUnitWeightKg(row))}
+                          </span>
+                        </span>
                       </div>
                     </div>
-                    <span className="flex size-11 items-center justify-center rounded-xl bg-[#eef3ff] text-[#003CFF]">
-                      <SquaresIntersect className="size-5" aria-hidden />
-                    </span>
+                    <MoveLeft className="size-5 text-zinc-400" aria-hidden />
                   </button>
                 ))}
               </div>
