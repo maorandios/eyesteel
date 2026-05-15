@@ -302,10 +302,8 @@ function clusterFastenerSamplesByCollinearity(
  * `null` if the line misses entirely. Both `origin` and `box` must be in the **same coordinate
  * frame**. `dir` does not need to be unit (the t values scale accordingly).
  *
- * Used by ייצור disc placement to find where each bolt's axis enters and exits each visible
- * per-member AABB — one disc is drawn at every entry and every exit on every visible part the
- * bolt's line crosses. A bolt whose line misses every visible part places zero discs and the
- * bolt mesh is hidden by the caller.
+ * Used by ייצור disc placement to find where a bolt's axis pierces each visible per-member
+ * AABB. `origin` is the bolt reference on the line (`t = 0`).
  */
 function lineIntersectsAabb(
   origin: THREE.Vector3,
@@ -3349,17 +3347,13 @@ export class ViewerEngine {
       const sampleAxis = new THREE.Vector3();
 
       /**
-       * Place red hole discs where a bolt's axis line **enters and exits** each visible per-member
-       * AABB. The bolt's line is `posLocal + t * axisLocal` in model-local coords; for every visible
-       * part box (world coords) we slab-test the line for `[tMin, tMax]` and drop one disc at each
-       * crossing — `tMin` = entry face, `tMax` = exit face. A bolt whose line misses every visible
-       * part returns `0`, and the caller hides the bolt mesh so חלק mode is left with discs only.
+       * Place one red hole disc per visible per-member AABB that the bolt axis pierces.
        *
-       * This is the post-revert disc placement contract: bolt selection (in
-       * {@link buildProductionBoltAllowlistPayload}) decides **which** bolts belong to the view, and
-       * this function decides **where** their discs sit by purely geometric AABB intersection — no
-       * sample picking, no IFC link graph, no centroid heuristics. Secondary-part bolts get discs
-       * automatically since their axis still crosses the visible part's AABB.
+       * `posWorld` lies on the bolt centreline (`t = 0`). Slab intersection gives `[tMin, tMax]`
+       * where the line crosses that member's hull. We always keep **one** face — whichever of
+       * `tMin` / `tMax` is closer to the bolt (`|t|` smaller). Same rule for plates, H/I beams,
+       * RHS, angles, etc.: no shape-specific thresholds and no mirrored disc on the far skin
+       * (opposite flange, underside of a plate, etc.).
        */
       const placeAxisAabbIntersectionDiscs = (
         posLocal: THREE.Vector3,
@@ -3380,28 +3374,17 @@ export class ViewerEngine {
           const t = lineIntersectsAabb(posWorld, axisWorld, box);
           if (!t) continue;
           const [tMin, tMax] = t;
+          if (tMax - tMin < 1e-5) continue;
 
-          const entryWorld = new THREE.Vector3(
-            posWorld.x + tMin * axisWorld.x,
-            posWorld.y + tMin * axisWorld.y,
-            posWorld.z + tMin * axisWorld.z,
+          const tFace = Math.abs(tMin) <= Math.abs(tMax) ? tMin : tMax;
+          const faceWorld = new THREE.Vector3(
+            posWorld.x + tFace * axisWorld.x,
+            posWorld.y + tFace * axisWorld.y,
+            posWorld.z + tFace * axisWorld.z,
           );
-          const entryLocal = entryWorld.clone().applyMatrix4(modelWorldInverse);
-          if (addMarkerDisc(entryLocal, axisLocal, holeRadius, `${dedupePrefix}:box${bi}:entry`)) {
+          const faceLocal = faceWorld.applyMatrix4(modelWorldInverse);
+          if (addMarkerDisc(faceLocal, axisLocal, holeRadius, `${dedupePrefix}:box${bi}`)) {
             placed++;
-          }
-
-          /** Tangent (single-point) intersection — entry == exit, skip the second disc. */
-          if (tMax - tMin > 1e-4) {
-            const exitWorld = new THREE.Vector3(
-              posWorld.x + tMax * axisWorld.x,
-              posWorld.y + tMax * axisWorld.y,
-              posWorld.z + tMax * axisWorld.z,
-            );
-            const exitLocal = exitWorld.clone().applyMatrix4(modelWorldInverse);
-            if (addMarkerDisc(exitLocal, axisLocal, holeRadius, `${dedupePrefix}:box${bi}:exit`)) {
-              placed++;
-            }
           }
         }
         return placed;
@@ -3461,8 +3444,8 @@ export class ViewerEngine {
          * with many fragment **samples** (global × local placement per physical bolt). Each
          * physical bolt's samples are collinear (head + shank + nut share an axis); we cluster
          * by collinearity, then for every cluster intersect its axis line with each visible
-         * per-member AABB. The line `meanPos + t * clusterAxis` is the bolt's centreline; entry
-         * + exit on each AABB give one disc per visible face the bolt pierces.
+         * per-member AABB. The line `meanPos + t * clusterAxis` is the bolt's centreline; one
+         * disc per member hull on the face nearest the bolt (same rule for every profile type).
          */
         try {
           const elements = await fragModel._getElements([work.localId]);
