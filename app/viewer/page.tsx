@@ -72,6 +72,8 @@ import {
   analyzerBoltsForProductionHoleOverlay,
   analyzerEntityMatchesPick,
   analyzerRefsFromAssembly,
+  analyzerSteelPartRefsFromAssembly,
+  normalizeIfcGuidKey,
   resolvePartIsolationBoltPolicy,
   resolveProfileIsolationBoltPolicy,
 } from "@/lib/viewer/ifc-guid";
@@ -1148,7 +1150,7 @@ export default function ViewerPage() {
   const showOnlyProductionRefs = useCallback(
     async (
       refs: readonly { id: string; expressId: number | null }[],
-      holeOverlay?: Pick<ProductionHoleOverlayInput, "visibleSteelPartIds">,
+      holeOverlay?: Pick<ProductionHoleOverlayInput, "visibleSteelPartIds" | "visibleSteelRefs">,
     ) => {
       if (!engine || refs.length === 0) return false;
       /**
@@ -1172,25 +1174,45 @@ export default function ViewerPage() {
       }
 
       const steelIds = holeOverlay?.visibleSteelPartIds;
-      if (steelIds && steelIds.length > 0 && analyzerData) {
-        const allBolts = (analyzerData.parts ?? []).filter(isAnalyzerBoltRow);
-        const boltsForOverlay = analyzerBoltsForProductionHoleOverlay(
-          steelIds,
-          analyzerData.assemblies ?? [],
-          analyzerData.boltSteelLinks,
-          allBolts,
-          refs,
-        );
-        /**
-         * Capture fastener bboxes **before** `hideBoltsKeepHoles` hides them — some fragment paths
-         * omit bbox data for invisible tiles.
-         */
-        await engine.showProductionHoleOverlays({
-          boltSteelLinks: analyzerData.boltSteelLinks ?? [],
-          bolts: allBolts,
-          visibleSteelPartIds: steelIds,
-          overlayBoltRows: boltsForOverlay,
-        });
+      const productionVisibleSteelGuidKeys =
+        steelIds && steelIds.length > 0
+          ? new Set(
+              steelIds
+                .map((id) => normalizeIfcGuidKey(id))
+                .filter((k): k is string => !!k),
+            )
+          : null;
+
+      const overlayPack =
+        steelIds && steelIds.length > 0 && analyzerData
+          ? (() => {
+              const allBolts = (analyzerData.parts ?? []).filter(isAnalyzerBoltRow);
+              const boltsForOverlay = analyzerBoltsForProductionHoleOverlay(
+                steelIds,
+                analyzerData.assemblies ?? [],
+                analyzerData.boltSteelLinks,
+                allBolts,
+                refs,
+              );
+              return {
+                allBolts,
+                boltsForOverlay,
+                input: {
+                  boltSteelLinks: analyzerData.boltSteelLinks ?? [],
+                  bolts: allBolts,
+                  visibleSteelPartIds: steelIds,
+                  isolationSteelLocalIds: [...ids],
+                  ...(holeOverlay?.visibleSteelRefs && holeOverlay.visibleSteelRefs.length > 0
+                    ? { visibleSteelRefs: holeOverlay.visibleSteelRefs }
+                    : {}),
+                  overlayBoltRows: boltsForOverlay,
+                } satisfies Parameters<ViewerEngine["primeProductionBoltAllowlistForIsolation"]>[0],
+              };
+            })()
+          : null;
+
+      if (overlayPack) {
+        await engine.primeProductionBoltAllowlistForIsolation(overlayPack.input);
       } else {
         engine.clearProductionHoleOverlays();
       }
@@ -1204,17 +1226,32 @@ export default function ViewerPage() {
       const ok = await engine.applyIsolation("isolated", ids, {
         focus: false,
         hideBoltsKeepHoles: false,
+        enforceProductionBoltHardwareAllowlist: true,
         ...(snapshotGuids != null && snapshotGuids.size > 0
           ? {
               boltGuidIsolationAllowlist: snapshotGuids,
               spatialBoltIsolationAllowlist: snapshotGuids,
             }
           : {}),
+        ...(productionVisibleSteelGuidKeys != null && productionVisibleSteelGuidKeys.size > 0
+          ? { productionVisibleSteelGuidKeys }
+          : {}),
       });
       if (!ok) {
         engine.clearProductionHoleOverlays();
         return false;
       }
+
+      if (overlayPack) {
+        const visibleLocals = engine.getLastIsolatedVisibleLocals();
+        await engine.showProductionHoleOverlays({
+          ...overlayPack.input,
+          ...(visibleLocals != null && visibleLocals.size > 0
+            ? { fastenerDiscLocalIdAllowlist: visibleLocals }
+            : {}),
+        });
+      }
+
       await engine.frameAnalyzerSubsetIso(refs);
 
       return true;
@@ -1269,7 +1306,8 @@ export default function ViewerPage() {
     async (row: AggregatedAssemblyRow) => {
       const primary = row.instances[0];
       if (!primary) return;
-      const refs = analyzerRefsFromAssembly(primary);
+      /** Steel parts only — `assembly.bolts` preloaded unrelated fasteners into isolation. */
+      const refs = analyzerSteelPartRefsFromAssembly(primary);
       setProductionSelection({ type: "assembly", id: primary.id });
       setProductionViewerOpen(true);
       setProductionPartsDrawerOpen(false);
@@ -1290,7 +1328,8 @@ export default function ViewerPage() {
       setActiveSheet("none");
       setSelectionStatus(`ייצור אסמבלי: ${row.displayMark}`);
       const visibleSteelPartIds = primary.parts.map((p) => p.id);
-      await showOnlyProductionRefs(refs, { visibleSteelPartIds });
+      const visibleSteelRefs = primary.parts.map((p) => ({ id: p.id, expressId: p.expressId }));
+      await showOnlyProductionRefs(refs, { visibleSteelPartIds, visibleSteelRefs });
     },
     [clearViewModeStore, engine, setActiveSheet, showOnlyProductionRefs],
   );
@@ -1320,7 +1359,8 @@ export default function ViewerPage() {
       setActiveSheet("none");
       setSelectionStatus(`ייצור חלק: ${row.displayMark}`);
       const visibleSteelPartIds = row.instances.map((p) => p.id);
-      await showOnlyProductionRefs(refs, { visibleSteelPartIds });
+      const visibleSteelRefs = row.instances.map((p) => ({ id: p.id, expressId: p.expressId }));
+      await showOnlyProductionRefs(refs, { visibleSteelPartIds, visibleSteelRefs });
     },
     [clearViewModeStore, engine, setActiveSheet, showOnlyProductionRefs],
   );

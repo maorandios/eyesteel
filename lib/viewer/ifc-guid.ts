@@ -6,8 +6,40 @@ import type { AnalyzerAssembly, AnalyzerBoltRow } from "@/types/domain";
  */
 export function normalizeIfcGuidKey(raw: string | null | undefined): string | null {
   if (!raw) return null;
-  const u = raw.trim().toUpperCase().replace(/-/g, "").replace(/\s+/g, "");
+  let u = raw.trim().toUpperCase().replace(/-/g, "").replace(/\s+/g, "");
+  if (u.startsWith("{") && u.endsWith("}")) u = u.slice(1, -1);
   return u || null;
+}
+
+/**
+ * Spellings to try with {@link FragmentsModel#getLocalIdsByGuids} when the analyzer string
+ * does not match the fragment worker’s preferred encoding (dashed vs compact UUID, braces, etc.).
+ */
+export function expandIfcGuidLookupVariants(raw: string): string[] {
+  const t = raw.trim();
+  if (!t) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (s: string) => {
+    const x = s.trim();
+    if (!x || seen.has(x)) return;
+    seen.add(x);
+    out.push(x);
+  };
+  add(t);
+  let inner = t;
+  if (inner.startsWith("{") && inner.endsWith("}")) {
+    inner = inner.slice(1, -1).trim();
+    add(inner);
+  }
+  const n = normalizeIfcGuidKey(t);
+  if (n && n.length === 32 && /^[0-9A-F]+$/.test(n)) {
+    const dashed = `${n.slice(0, 8)}-${n.slice(8, 12)}-${n.slice(12, 16)}-${n.slice(16, 20)}-${n.slice(20, 32)}`;
+    add(dashed);
+    add(`{${dashed}}`);
+    add(n);
+  }
+  return out;
 }
 
 export function analyzerEntityMatchesPick(
@@ -38,6 +70,16 @@ export function analyzerRefsFromAssembly(assembly: {
     ...assembly.parts.map((p) => ({ id: p.id, expressId: p.expressId })),
     ...(assembly.bolts ?? []).map((b) => ({ id: b.id, expressId: b.expressId })),
   ];
+}
+
+/**
+ * Steel parts only — מצב ייצור isolation seeds. {@link analyzerRefsFromAssembly} also lists
+ * `assembly.bolts`, which can preload unrelated catalog bolts into the visible set.
+ */
+export function analyzerSteelPartRefsFromAssembly(assembly: {
+  parts: AnalyzerHighlightRef[];
+}): AnalyzerHighlightRef[] {
+  return assembly.parts.map((p) => ({ id: p.id, expressId: p.expressId }));
 }
 
 function partGuidsMatch(a: string, b: string): boolean {
