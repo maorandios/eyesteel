@@ -3155,22 +3155,6 @@ export class ViewerEngine {
       const { boltKeyToRawGuid, boltByKey, steelRefBoxWorld, steelPerPartBoxesWorld } =
         await this.buildProductionBoltAllowlistPayload(input, fragModel, fragments);
 
-      /**
-       * Red discs only if the hole reference sits within this distance of the **closest member**
-       * AABB surface — uses {@link steelPerPartBoxesWorld} so a wider base plate does not inflate
-       * the hull and reject column‑flange bolt samples that would sit "deep inside" the union AABB.
-       * Absolute cap from union diagonal; per‑part boxes already keep the measured distance tiny
-       * for legitimate connection bolts.
-       */
-      const steelHoleDiscMaxSurfaceGapM =
-        steelRefBoxWorld && !steelRefBoxWorld.isEmpty()
-          ? THREE.MathUtils.clamp(
-              steelRefBoxWorld.getSize(new THREE.Vector3()).length() * 0.016,
-              0.014,
-              0.075,
-            )
-          : Number.POSITIVE_INFINITY;
-
       type BoltWork = {
         boltKey: string;
         rawGuid: string;
@@ -3377,29 +3361,57 @@ export class ViewerEngine {
         steelPerPartBoxesWorld.length > 0 ||
         (steelRefBoxWorld != null && !steelRefBoxWorld.isEmpty());
 
-      /** `radius` = hole radius in model metres (typically {@link diameterM} / 2). */
+      /**
+       * Disc must land **on or inside** a visible per‑member box (per‑member, not the union).
+       * No snapping / projection: a Tekla "hole only" fastener whose sample sits between the
+       * displayed plate and a hidden plate underneath has the disc fall in the gap — refusing
+       * to draw is intentional, since projecting it onto the visible face would re-introduce
+       * the very hole we wanted to drop.
+       */
+      const DISC_ON_SURFACE_TOL_M = 0.005;
+      const discPointInVisiblePart = (worldPoint: THREE.Vector3): boolean => {
+        if (!hasAnySteelHull) return true;
+        const tmpClamp = new THREE.Vector3();
+        if (steelPerPartBoxesWorld.length > 0) {
+          for (const box of steelPerPartBoxesWorld) {
+            if (!box || box.isEmpty()) continue;
+            if (box.containsPoint(worldPoint)) return true;
+            box.clampPoint(worldPoint, tmpClamp);
+            if (tmpClamp.distanceTo(worldPoint) <= DISC_ON_SURFACE_TOL_M) return true;
+          }
+          return false;
+        }
+        if (steelRefBoxWorld && !steelRefBoxWorld.isEmpty()) {
+          if (steelRefBoxWorld.containsPoint(worldPoint)) return true;
+          steelRefBoxWorld.clampPoint(worldPoint, tmpClamp);
+          if (tmpClamp.distanceTo(worldPoint) <= DISC_ON_SURFACE_TOL_M) return true;
+          return false;
+        }
+        return true;
+      };
+
+      /**
+       * `radius` = hole radius in model metres (typically {@link diameterM} / 2). Returns
+       * `true` if a new disc mesh was added (i.e. position passed the on/inside test and the
+       * pose was not already drawn). Callers use the return value to count actual placements,
+       * so a bolt whose every disc sample falls outside any visible per-member box can be
+       * hidden from isolation together with its disc.
+       */
       const addMarkerDisc = (
         position: THREE.Vector3,
         normal: THREE.Vector3,
         radius: number,
         dedupeId: string,
-      ) => {
-        if (hasAnySteelHull && Number.isFinite(steelHoleDiscMaxSurfaceGapM)) {
+      ): boolean => {
+        if (hasAnySteelHull) {
           tmpDiscWorld.copy(position).applyMatrix4(this.modelObject!.matrixWorld);
-          const surfaceDist = distancePointWorldToClosestPartSurface(
-            steelPerPartBoxesWorld,
-            steelRefBoxWorld,
-            tmpDiscWorld,
-          );
-          if (surfaceDist > steelHoleDiscMaxSurfaceGapM) {
-            return;
-          }
+          if (!discPointInVisiblePart(tmpDiscWorld)) return false;
         }
         const holeR = Math.max(radius, 0.003);
         const key = `${dedupeId}|${position.x.toFixed(4)},${position.y.toFixed(4)},${position.z.toFixed(
           4,
         )}|${normal.x.toFixed(2)},${normal.y.toFixed(2)},${normal.z.toFixed(2)}|${holeR.toFixed(4)}`;
-        if (markerKeys.has(key)) return;
+        if (markerKeys.has(key)) return false;
         markerKeys.add(key);
         const geom = new THREE.CircleGeometry(holeR, 64);
         const mesh = new THREE.Mesh(geom, markerMaterial);
@@ -3408,6 +3420,7 @@ export class ViewerEngine {
         mesh.quaternion.copy(quat.setFromUnitVectors(zNormal, normal));
         mesh.renderOrder = 20;
         group.add(mesh);
+        return true;
       };
 
       /** All scene meshes carrying a fragment `tileId` (ThatOpen may attach more than one per tile in edge cases). */
@@ -3612,6 +3625,44 @@ export class ViewerEngine {
 
       const steelPickWorld = new THREE.Vector3();
 
+      /**
+       * Pre‑fetch each resolved bolt's world AABB so we can run a centroid test after disc
+       * placement. A bolt whose **body extends below the displayed plate** (anchor bolt going
+       * into concrete, or Tekla "hide bolt, show hole only" fastener bridging the visible plate
+       * and a hidden one) places its disc on the plate face but its mesh protrudes below — the
+       * disc test alone keeps the bolt visible and the protruding black cylinder stays on
+       * screen. Hiding bolts whose **bbox centroid** is outside every visible per‑member box
+       * eliminates those cylinders while joint bolts (centroid inside the flange) survive.
+       */
+      const boltLocalIdToWorldBox = new Map<number, THREE.Box3>();
+      if (resolvedForDiscs.length > 0) {
+        const BBCHUNK = 200;
+        const lids = resolvedForDiscs.map((w) => w.localId);
+        for (let off = 0; off < lids.length; off += BBCHUNK) {
+          const slice = lids.slice(off, off + BBCHUNK);
+          try {
+            const boxes = await fragments.getBBoxes({ [this.modelId!]: new Set(slice) });
+            for (let j = 0; j < slice.length; j++) {
+              const b = boxes[j];
+              if (b instanceof THREE.Box3 && !b.isEmpty()) {
+                boltLocalIdToWorldBox.set(slice[j], b.clone());
+              }
+            }
+          } catch {
+            /* fall back to per‑bolt sample test only */
+          }
+        }
+      }
+      const boltCentroidWorld = new THREE.Vector3();
+
+      /**
+       * Fragment locals of bolts whose mesh must be hidden after the disc loop runs. A bolt is
+       * added either because every disc candidate failed the on/inside test (no disc drawn at
+       * all) or because its body centroid sits outside every visible per‑member box (disc drawn
+       * but the mesh extends past the displayed steel — the protruding cylinder).
+       */
+      const boltLocalIdsToHide = new Set<number>();
+
       for (let i = 0; i < resolvedForDiscs.length; i++) {
         const work = resolvedForDiscs[i];
 
@@ -3673,8 +3724,9 @@ export class ViewerEngine {
               this.modelObject,
               steelPickWorld,
             );
-            addMarkerDisc(pick.pos, pick.axis, holeRadius, `${work.boltKey}:sample:${ci}`);
-            placedForBolt++;
+            if (addMarkerDisc(pick.pos, pick.axis, holeRadius, `${work.boltKey}:sample:${ci}`)) {
+              placedForBolt++;
+            }
           }
         } catch {
           /* geometry fallback below */
@@ -3835,8 +3887,9 @@ export class ViewerEngine {
               ? Math.max(diameterM / 2, 0.004)
               : Math.max(c.midLen * 0.45, 0.008);
           axisDir.set(0, 0, 0).setComponent(c.axis, 1);
-          addMarkerDisc(c.center, axisDir, radius, `${work.boltKey}:mesh:${ci}`);
-          placedForBolt++;
+          if (addMarkerDisc(c.center, axisDir, radius, `${work.boltKey}:mesh:${ci}`)) {
+            placedForBolt++;
+          }
         }
 
         /**
@@ -3880,10 +3933,53 @@ export class ViewerEngine {
                 diameterM != null
                   ? Math.max(diameterM / 2, 0.004)
                   : Math.max(Math.min(size.x, size.y, size.z) * 0.42, 0.008);
-              addMarkerDisc(center, axisDir, fr, `${work.boltKey}:bbox-fallback`);
+              if (addMarkerDisc(center, axisDir, fr, `${work.boltKey}:bbox-fallback`)) {
+                placedForBolt++;
+              }
             }
           }
         }
+
+        if (work.localId != null) {
+          /**
+           * Two visibility verdicts:
+           *  (a) `placedForBolt === 0` — every disc candidate failed the on/inside test, so
+           *      neither the disc nor the bolt mesh should be on screen.
+           *  (b) bbox centroid is outside every visible per‑member box — at least one disc
+           *      passed (e.g. the bolt head landed on the plate face) but the body extends
+           *      past the displayed steel. Keep the disc and drop the cylinder.
+           * Verdict (a) suffices on its own when no bbox is available (worker / streaming
+           * race); when a bbox is present we additionally apply (b).
+           */
+          let shouldHide = placedForBolt === 0;
+          if (!shouldHide) {
+            const bbox = boltLocalIdToWorldBox.get(work.localId);
+            if (bbox && !bbox.isEmpty()) {
+              bbox.getCenter(boltCentroidWorld);
+              if (!discPointInVisiblePart(boltCentroidWorld)) {
+                shouldHide = true;
+              }
+            }
+          }
+          if (shouldHide) boltLocalIdsToHide.add(work.localId);
+        }
+      }
+
+      /**
+       * Hide the IFC mesh of every bolt that either placed no disc or has its body centroid
+       * outside every visible per‑member box. This keeps the displayed plate looking clean: a
+       * red disc marks each hole on the plate face and there are no orphan bolt cylinders
+       * floating into the hidden region below. Also drop them from
+       * {@link lastIsolatedVisibleLocals} so downstream sketch edge / focus passes see the
+       * corrected visible set.
+       */
+      if (boltLocalIdsToHide.size > 0) {
+        const ids = [...boltLocalIdsToHide];
+        await this.chunkInvokeIds(ids, (slice) => fragModel.setVisible(slice, false));
+        if (this.lastIsolatedVisibleLocals) {
+          for (const lid of ids) this.lastIsolatedVisibleLocals.delete(lid);
+        }
+        await this.syncFragmentsViewForced(fragments);
       }
 
       this.productionHoleOverlayGroup = group;
