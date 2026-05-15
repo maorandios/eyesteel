@@ -3014,10 +3014,21 @@ export class ViewerEngine {
         }
       }
       if (steelLocalsSet.size > 0 && steelRefBoxWorld && !steelRefBoxWorld.isEmpty()) {
-        const expanded = new Set<number>(steelLocalsSet);
-        await this.mergeBoltHoleConnectionLocals(fragModel, expanded, allIdSet, undefined);
-        await this.mergeBoltHoleConnectionLocals(fragModel, expanded, allIdSet, undefined);
-        await this.mergeBoltHoleConnectionLocals(fragModel, expanded, allIdSet, undefined);
+        /**
+         * Two‑track expansion: (a) IFC `ConnectedTo` graph reach is the **trusted** source — only its
+         * hits can promote a bolt into the production allowlist directly; (b) the spatial sweep is
+         * suspect and only kept when it agrees with a per‑member proximity check.
+         *
+         * Tall columns previously laundered neighbour bolts into the allowlist via a single union
+         * hull padded by 120 mm — the union extended for the column's full height, so beam‑side bolts
+         * physically next to the flange but >150 mm from any *member* still passed the test.
+         */
+        const ifcGraphHits = new Set<number>(steelLocalsSet);
+        await this.mergeBoltHoleConnectionLocals(fragModel, ifcGraphHits, allIdSet, undefined);
+        await this.mergeBoltHoleConnectionLocals(fragModel, ifcGraphHits, allIdSet, undefined);
+        await this.mergeBoltHoleConnectionLocals(fragModel, ifcGraphHits, allIdSet, undefined);
+
+        const expanded = new Set<number>(ifcGraphHits);
         await this.mergeFastenersNearIsolationSeeds(
           fragModel,
           expanded,
@@ -3026,9 +3037,25 @@ export class ViewerEngine {
           undefined,
         );
 
-        const steelDiag = steelBox.getSize(new THREE.Vector3()).length();
-        const pad = THREE.MathUtils.clamp(steelDiag * 0.04, 0.028, 0.12);
-        const steelPadded = steelRefBoxWorld.clone().expandByScalar(pad);
+        /**
+         * Per‑member padded boxes — supersedes the union hull check. Tight constant pad: a real
+         * connection bolt sits at most a couple of cm off the member's actual face (head height
+         * + flange thickness slop), so 60 mm covers worst case without inviting neighbours.
+         */
+        const PER_PART_BOLT_NEAR_PAD_M = 0.06;
+        const partBoxesPadded =
+          steelPerPartBoxesWorld.length > 0
+            ? steelPerPartBoxesWorld.map((b) =>
+                b.clone().expandByScalar(PER_PART_BOLT_NEAR_PAD_M),
+              )
+            : [steelRefBoxWorld.clone().expandByScalar(PER_PART_BOLT_NEAR_PAD_M)];
+        const intersectsAnyPart = (bb: THREE.Box3): boolean => {
+          for (const padded of partBoxesPadded) {
+            if (padded.intersectsBox(bb)) return true;
+          }
+          return false;
+        };
+
         const supplemental = [...expanded].filter((id) => !steelLocalsSet.has(id));
         const BCHUNK = 220;
         for (let off = 0; off < supplemental.length; off += BCHUNK) {
@@ -3042,9 +3069,15 @@ export class ViewerEngine {
           const nearSteel: number[] = [];
           for (let j = 0; j < slice.length; j++) {
             const bb = boxes[j];
-            if (bb instanceof THREE.Box3 && !bb.isEmpty() && steelPadded.intersectsBox(bb)) {
-              nearSteel.push(slice[j]);
-            }
+            const lid = slice[j];
+            if (!(bb instanceof THREE.Box3) || bb.isEmpty()) continue;
+            /**
+             * Per‑member proximity gate replaces the union‑hull test. Both spatial and IFC‑graph
+             * candidates must touch a specific member's padded box; graph chains can drag in
+             * plates/bolts from adjacent assemblies via shared connection nodes otherwise.
+             */
+            if (!intersectsAnyPart(bb)) continue;
+            nearSteel.push(lid);
           }
           if (nearSteel.length === 0) continue;
           try {
