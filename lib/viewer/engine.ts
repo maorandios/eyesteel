@@ -7,7 +7,12 @@ import CameraControls from "camera-controls";
 import { LodMode, type FragmentsModel, type MeshData } from "@thatopen/fragments";
 import type { AnalyzerBoltRow, AnalyzerOutput, ViewerMode } from "@/types/domain";
 import { loadIfcModel } from "@/lib/viewer/ifc-loader";
-import { expandIfcGuidLookupVariants, normalizeIfcGuidKey } from "@/lib/viewer/ifc-guid";
+import {
+  boltSteelLinkNamesDisplayedPart,
+  expandIfcGuidLookupVariants,
+  normalizeIfcGuidKey,
+  normalizedBoltSteelGuidsForPart,
+} from "@/lib/viewer/ifc-guid";
 import { MeasurementController } from "@/lib/viewer/measurement/measurement-controller";
 import {
   CONTEXT_GHOST_FACE_OPACITY,
@@ -2876,9 +2881,33 @@ export class ViewerEngine {
   private static analyzerSteelEntitiesForProductionMap(
     input: ProductionHoleOverlayInput,
   ): { id: string; expressId: number | null }[] {
+    /** Full אסמבלי context for axis×hull intersection; {@link productionDisplayedSteelRefs} filters discs. */
     const refs = input.visibleSteelRefs;
     if (refs && refs.length > 0) return [...refs];
     return input.visibleSteelPartIds.map((id) => ({ id, expressId: null }));
+  }
+
+  private static analyzerSteelEntitiesForDisplayedPartDiscFilter(
+    input: ProductionHoleOverlayInput,
+  ): { id: string; expressId: number | null }[] {
+    const displayed = input.productionDisplayedSteelRefs;
+    if (displayed && displayed.length > 0) return [...displayed];
+    return ViewerEngine.analyzerSteelEntitiesForProductionMap(input);
+  }
+
+  /** חלק mode: bolt GUID keys with a direct `boltSteelLinks` row on the fabricated part only. */
+  private static productionPartScopeBoltKeys(
+    input: ProductionHoleOverlayInput,
+  ): Set<string> | null {
+    const scope = input.productionDisplayedSteelRefs;
+    if (!scope?.length) return null;
+    const keys = new Set<string>();
+    for (const ref of scope) {
+      for (const bk of normalizedBoltSteelGuidsForPart(ref.id, input.boltSteelLinks)) {
+        keys.add(bk);
+      }
+    }
+    return keys;
   }
 
   private static productionSteelPartMatchesVisible(
@@ -2913,10 +2942,17 @@ export class ViewerEngine {
      * AABB, leaving column‑flange bolt samples 100+ mm "inside" the union and being rejected.
      */
     steelPerPartBoxesWorld: THREE.Box3[];
+    /** חלק mode: hull of the fabricated part only — gates which red discs are kept. */
+    steelDisplayedPartBoxesWorld: THREE.Box3[];
   }> {
+    const partScopeBoltKeys = ViewerEngine.productionPartScopeBoltKeys(input);
     const boltKeyToRawGuid = new Map<string, string>();
+    const partIdsForLinks =
+      partScopeBoltKeys != null
+        ? (input.productionDisplayedSteelRefs ?? []).map((r) => r.id)
+        : input.visibleSteelPartIds;
     for (const link of input.boltSteelLinks ?? []) {
-      if (!ViewerEngine.productionSteelPartMatchesVisible(link.partGlobalId, input.visibleSteelPartIds)) {
+      if (!ViewerEngine.productionSteelPartMatchesVisible(link.partGlobalId, partIdsForLinks)) {
         continue;
       }
       const bk = normalizeIfcGuidKey(link.boltGlobalId) ?? link.boltGlobalId.trim();
@@ -2924,12 +2960,12 @@ export class ViewerEngine {
       if (!boltKeyToRawGuid.has(bk)) boltKeyToRawGuid.set(bk, link.boltGlobalId.trim());
     }
     /**
-     * {@link overlayBoltRows} carries hyperedge reach plus every bolt on any assembly that
-     * contains a visible part. Tekla often writes `boltSteelLinks` rows for only one side of
-     * a joint (the "main" member), so a bolt that physically pierces the visible beam may be
-     * linked only to the connected plate. Without this expansion חלק mode would miss those
-     * bolts entirely. The strict per‑part scope filter in {@link showProductionHoleOverlays}
-     * then drops bolts whose bbox does not volumetrically pierce the displayed part.
+     * אסמבלי: {@link overlayBoltRows} adds hyperedge reach + every bolt on assemblies that
+     * contain visible steel (Tekla often links a joint bolt only to the plate).
+     *
+     * חלק: {@link productionDisplayedSteelRefs} — overlay rows must already be in
+     * {@link productionPartScopeBoltKeys}; skip assembly neighbours and spatial IFC expansion
+     * below so welded-plate bolts never paint holes on the beam hull.
      */
     for (const b of input.overlayBoltRows ?? []) {
       const bk = normalizeIfcGuidKey(b.id) ?? b.id.trim();
@@ -2944,6 +2980,26 @@ export class ViewerEngine {
 
     let steelRefBoxWorld: THREE.Box3 | null = null;
     const steelPerPartBoxesWorld: THREE.Box3[] = [];
+    const steelDisplayedPartBoxesWorld: THREE.Box3[] = [];
+    const collectPerLocalBBoxes = async (locals: Iterable<number>): Promise<void> => {
+      const arr = [...locals];
+      const PER_PART_CHUNK = 64;
+      for (let off = 0; off < arr.length; off += PER_PART_CHUNK) {
+        const slice = arr.slice(off, off + PER_PART_CHUNK);
+        for (const lid of slice) {
+          try {
+            const boxes = await fragments.getBBoxes({ [this.modelId!]: new Set([lid]) });
+            for (const b of boxes) {
+              if (b instanceof THREE.Box3 && !b.isEmpty()) {
+                steelPerPartBoxesWorld.push(b.clone());
+              }
+            }
+          } catch {
+            /* ignore single-id failure */
+          }
+        }
+      }
+    };
     try {
       const steelMap = await this.modelIdMapForAnalyzerEntities(
         ViewerEngine.analyzerSteelEntitiesForProductionMap(input),
@@ -2957,26 +3013,46 @@ export class ViewerEngine {
       }
       const steelBox = new THREE.Box3();
       if (steelLocalsSet.size > 0) {
-        const steelLocalsArr = [...steelLocalsSet];
+        await collectPerLocalBBoxes(steelLocalsSet);
+        for (const b of steelPerPartBoxesWorld) {
+          steelBox.union(b);
+        }
+        if (!steelBox.isEmpty()) {
+          steelRefBoxWorld = steelBox.clone();
+        }
+      }
+      const displayedMap = await this.modelIdMapForAnalyzerEntities(
+        ViewerEngine.analyzerSteelEntitiesForDisplayedPartDiscFilter(input),
+      );
+      const displayedLocals = [...(displayedMap[this.modelId!] ?? new Set<number>())].filter(
+        (lid: number) => allIdSet.has(lid),
+      );
+      /** Isolated seed is always the fabricated חלק — union when analyzer GUID→local mapping misses. */
+      if (input.productionDisplayedSteelRefs?.length) {
+        const seenDisplayed = new Set(displayedLocals);
+        for (const lid of input.isolationSteelLocalIds ?? []) {
+          if (typeof lid === "number" && Number.isFinite(lid) && allIdSet.has(lid) && !seenDisplayed.has(lid)) {
+            seenDisplayed.add(lid);
+            displayedLocals.push(lid);
+          }
+        }
+      }
+      if (displayedLocals.length > 0) {
         const PER_PART_CHUNK = 64;
-        for (let off = 0; off < steelLocalsArr.length; off += PER_PART_CHUNK) {
-          const slice = steelLocalsArr.slice(off, off + PER_PART_CHUNK);
+        for (let off = 0; off < displayedLocals.length; off += PER_PART_CHUNK) {
+          const slice = displayedLocals.slice(off, off + PER_PART_CHUNK);
           for (const lid of slice) {
             try {
-              const arr = await fragments.getBBoxes({ [this.modelId!]: new Set([lid]) });
-              for (const b of arr) {
+              const boxes = await fragments.getBBoxes({ [this.modelId!]: new Set([lid]) });
+              for (const b of boxes) {
                 if (b instanceof THREE.Box3 && !b.isEmpty()) {
-                  steelPerPartBoxesWorld.push(b.clone());
-                  steelBox.union(b);
+                  steelDisplayedPartBoxesWorld.push(b.clone());
                 }
               }
             } catch {
               /* ignore single-id failure */
             }
           }
-        }
-        if (!steelBox.isEmpty()) {
-          steelRefBoxWorld = steelBox.clone();
         }
       }
       if (steelLocalsSet.size > 0 && steelRefBoxWorld && !steelRefBoxWorld.isEmpty()) {
@@ -3080,7 +3156,13 @@ export class ViewerEngine {
     }
 
     this.productionBoltGuidAllowlistSnapshot = new Set(boltKeyToRawGuid.keys());
-    return { boltKeyToRawGuid, boltByKey, steelRefBoxWorld, steelPerPartBoxesWorld };
+    return {
+      boltKeyToRawGuid,
+      boltByKey,
+      steelRefBoxWorld,
+      steelPerPartBoxesWorld,
+      steelDisplayedPartBoxesWorld,
+    };
   }
 
   /**
@@ -3118,8 +3200,13 @@ export class ViewerEngine {
       const fragModel = fragments.list.get(this.modelId);
       if (!fragModel) return;
 
-      const { boltKeyToRawGuid, boltByKey, steelRefBoxWorld, steelPerPartBoxesWorld } =
-        await this.buildProductionBoltAllowlistPayload(input, fragModel, fragments);
+      const {
+        boltKeyToRawGuid,
+        boltByKey,
+        steelRefBoxWorld,
+        steelPerPartBoxesWorld,
+        steelDisplayedPartBoxesWorld,
+      } = await this.buildProductionBoltAllowlistPayload(input, fragModel, fragments);
 
       type BoltWork = {
         boltKey: string;
@@ -3244,7 +3331,15 @@ export class ViewerEngine {
         polygonOffsetUnits: -4,
       });
 
+      const partScopeDisplayedPartIds = (input.productionDisplayedSteelRefs ?? []).map((r) => r.id);
+      const partScopeActive = partScopeDisplayedPartIds.length > 0;
+      const discGateBoxes =
+        partScopeActive && steelDisplayedPartBoxesWorld.length > 0
+          ? steelDisplayedPartBoxesWorld
+          : steelPerPartBoxesWorld;
+
       const hasAnySteelHull =
+        discGateBoxes.length > 0 ||
         steelPerPartBoxesWorld.length > 0 ||
         (steelRefBoxWorld != null && !steelRefBoxWorld.isEmpty());
 
@@ -3259,8 +3354,8 @@ export class ViewerEngine {
       const discPointInVisiblePart = (worldPoint: THREE.Vector3): boolean => {
         if (!hasAnySteelHull) return true;
         const tmpClamp = new THREE.Vector3();
-        if (steelPerPartBoxesWorld.length > 0) {
-          for (const box of steelPerPartBoxesWorld) {
+        if (discGateBoxes.length > 0) {
+          for (const box of discGateBoxes) {
             if (!box || box.isEmpty()) continue;
             if (box.containsPoint(worldPoint)) return true;
             box.clampPoint(worldPoint, tmpClamp);
@@ -3347,6 +3442,14 @@ export class ViewerEngine {
       const sampleAxis = new THREE.Vector3();
 
       /**
+       * חלק: intersect only the fabricated member's hull (bottom-flange discs). אסמבלי: every mate.
+       */
+      const intersectionBoxes =
+        partScopeActive && steelDisplayedPartBoxesWorld.length > 0
+          ? steelDisplayedPartBoxesWorld
+          : steelPerPartBoxesWorld;
+
+      /**
        * Place one red hole disc per visible per-member AABB that the bolt axis pierces.
        *
        * `posWorld` lies on the bolt centreline (`t = 0`). Slab intersection gives `[tMin, tMax]`
@@ -3361,15 +3464,15 @@ export class ViewerEngine {
         holeRadius: number,
         dedupePrefix: string,
       ): number => {
-        if (steelPerPartBoxesWorld.length === 0 || axisLocal.lengthSq() < 1e-12) return 0;
+        if (intersectionBoxes.length === 0 || axisLocal.lengthSq() < 1e-12) return 0;
         const posWorld = posLocal.clone().applyMatrix4(this.modelObject!.matrixWorld);
         const axisWorld = axisLocal.clone().transformDirection(this.modelObject!.matrixWorld);
         if (axisWorld.lengthSq() < 1e-12) return 0;
         axisWorld.normalize();
 
         let placed = 0;
-        for (let bi = 0; bi < steelPerPartBoxesWorld.length; bi++) {
-          const box = steelPerPartBoxesWorld[bi];
+        for (let bi = 0; bi < intersectionBoxes.length; bi++) {
+          const box = intersectionBoxes[bi];
           if (!box || box.isEmpty()) continue;
           const t = lineIntersectsAabb(posWorld, axisWorld, box);
           if (!t) continue;
@@ -3428,8 +3531,24 @@ export class ViewerEngine {
        */
       const boltLocalIdsToHide = new Set<number>();
 
+      const partScopeBoltEligible = (_work: BoltWork & { localId: number }): boolean => {
+        if (!partScopeActive) return true;
+        /**
+         * Never pre-reject from IFC links or bolt-centroid tests — bottom-flange fasteners often
+         * have no `boltSteelLinks` row on the beam and their mesh centroid sits outside the flange
+         * AABB. {@link placeAxisAabbIntersectionDiscs} + {@link discGateBoxes} keep discs on the
+         * fabricated part only (same end result as אסמבלי, without plate ghosts).
+         */
+        return true;
+      };
+
       for (let i = 0; i < resolvedForDiscs.length; i++) {
         const work = resolvedForDiscs[i];
+
+        if (!partScopeBoltEligible(work)) {
+          if (work.localId != null) boltLocalIdsToHide.add(work.localId);
+          continue;
+        }
 
         const diameterM =
           work.row?.boltHoleDiameterMm != null && Number.isFinite(work.row.boltHoleDiameterMm)

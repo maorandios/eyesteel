@@ -76,6 +76,7 @@ import {
   normalizeIfcGuidKey,
   resolvePartIsolationBoltPolicy,
   resolveProfileIsolationBoltPolicy,
+  steelPartGuidsSharingAssembliesWith,
 } from "@/lib/viewer/ifc-guid";
 import {
   compositeViewerSnapshotPngBlob,
@@ -1183,19 +1184,23 @@ export default function ViewerPage() {
       }
 
       const steelIds = holeOverlay?.visibleSteelPartIds;
-      const productionVisibleSteelGuidKeys =
-        steelIds && steelIds.length > 0
-          ? new Set(
-              steelIds
-                .map((id) => normalizeIfcGuidKey(id))
-                .filter((k): k is string => !!k),
-            )
-          : null;
+      /** חלק: prune isolation to the fabricated member only; אסמבלי: full visible steel set. */
+      const productionVisibleSteelGuidKeys = (() => {
+        const scopeIds =
+          holeOverlay?.displayedSteelRefs && holeOverlay.displayedSteelRefs.length > 0
+            ? holeOverlay.displayedSteelRefs.map((r) => r.id)
+            : steelIds;
+        if (!scopeIds || scopeIds.length === 0) return null;
+        return new Set(
+          scopeIds.map((id) => normalizeIfcGuidKey(id)).filter((k): k is string => !!k),
+        );
+      })();
 
       const overlayPack =
         steelIds && steelIds.length > 0 && analyzerData
           ? (() => {
               const allBolts = (analyzerData.parts ?? []).filter(isAnalyzerBoltRow);
+              /** חלק uses the same assembly bolt pool as אסמבלי; discs filter to {@link productionDisplayedSteelRefs}. */
               const boltsForOverlay = analyzerBoltsForProductionHoleOverlay(
                 steelIds,
                 analyzerData.assemblies ?? [],
@@ -1257,9 +1262,16 @@ export default function ViewerPage() {
 
       if (overlayPack) {
         const visibleLocals = engine.getLastIsolatedVisibleLocals();
+        /**
+         * חלק: fasteners are stripped from `lastIsolatedVisibleLocals` before overlays run — do not
+         * gate discs on that set or every bolt is filtered out. אסמבלי keeps the allowlist to drop
+         * neighbour ghosts when the merged isolation set is wider than the assembly.
+         */
+        const partScopeActive =
+          (holeOverlay?.displayedSteelRefs?.length ?? 0) > 0;
         await engine.showProductionHoleOverlays({
           ...overlayPack.input,
-          ...(visibleLocals != null && visibleLocals.size > 0
+          ...(!partScopeActive && visibleLocals != null && visibleLocals.size > 0
             ? { fastenerDiscLocalIdAllowlist: visibleLocals }
             : {}),
         });
@@ -1375,15 +1387,23 @@ export default function ViewerPage() {
       setSelectedAssemblyId(null);
       setActiveSheet("none");
       setSelectionStatus(`ייצור חלק: ${row.displayMark}`);
-      const visibleSteelPartIds = [first.id];
-      const visibleSteelRefs = [{ id: first.id, expressId: first.expressId }];
+      const assemblies = analyzerData?.assemblies ?? [];
+      const assemblyMateIds = steelPartGuidsSharingAssembliesWith(first.id, assemblies);
+      const parts = analyzerData?.parts ?? [];
+      const visibleSteelRefs = assemblyMateIds.map((id) => {
+        const nk = normalizeIfcGuidKey(id);
+        const part =
+          parts.find((p) => normalizeIfcGuidKey(p.id) === nk) ??
+          parts.find((p) => p.id.trim() === id.trim());
+        return { id, expressId: part?.expressId ?? null };
+      });
       await showOnlyProductionRefs(refs, {
-        visibleSteelPartIds,
+        visibleSteelPartIds: assemblyMateIds,
         visibleSteelRefs,
         displayedSteelRefs: [{ id: first.id, expressId: first.expressId }],
       });
     },
-    [clearViewModeStore, engine, setActiveSheet, showOnlyProductionRefs],
+    [analyzerData?.assemblies, analyzerData?.parts, clearViewModeStore, engine, setActiveSheet, showOnlyProductionRefs],
   );
 
   const handleProductionPickAssemblyPart = useCallback(

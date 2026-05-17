@@ -177,6 +177,79 @@ export function analyzerBoltsForProductionHoleOverlay(
   return [...byKey.values()];
 }
 
+/**
+ * True when `boltSteelLinks` names at least one of `displayedPartIds` for this bolt.
+ * `false` when every link row points at other steel (e.g. welded plate only).
+ * `null` when there are no link rows for this bolt — caller should use geometry.
+ */
+export function boltSteelLinkNamesDisplayedPart(
+  boltGlobalId: string,
+  displayedPartIds: readonly string[],
+  boltSteelLinks: readonly { boltGlobalId: string; partGlobalId: string }[] | undefined,
+): boolean | null {
+  const bk = normalizeIfcGuidKey(boltGlobalId) ?? boltGlobalId.trim();
+  if (!bk) return null;
+  let sawRow = false;
+  let hitsDisplayed = false;
+  for (const row of boltSteelLinks ?? []) {
+    const rowBk = normalizeIfcGuidKey(row.boltGlobalId) ?? row.boltGlobalId.trim();
+    if (rowBk !== bk) continue;
+    sawRow = true;
+    for (const pid of displayedPartIds) {
+      if (partGuidsMatch(row.partGlobalId, pid)) {
+        hitsDisplayed = true;
+        break;
+      }
+    }
+    if (hitsDisplayed) break;
+  }
+  if (!sawRow) return null;
+  return hitsDisplayed;
+}
+
+/**
+ * חלק (single-part) ייצור bolt pool.
+ *
+ * Uses direct links + hyperedge reach for the fabricated part (so secondary joints still work),
+ * but **not** the whole assembly bolt list (that pulled in every plate fastener). Drops bolts
+ * whose IFC links name **only** neighbour members (welded plate holes on a beam view).
+ * Bolts with no link rows are kept — the viewer drops their discs when the hardware centroid
+ * sits outside the displayed part hull.
+ */
+export function analyzerBoltsForProductionPartScope(
+  displayedPartIds: readonly string[],
+  assemblies: readonly AnalyzerAssembly[],
+  boltSteelLinks: readonly { boltGlobalId: string; partGlobalId: string }[] | undefined,
+  allBoltRows: readonly AnalyzerBoltRow[],
+): AnalyzerBoltRow[] {
+  const byKey = new Map<string, AnalyzerBoltRow>();
+  const take = (keys: Set<string>) => {
+    for (const b of allBoltRows) {
+      const bk = normalizeIfcGuidKey(b.id) ?? b.id.trim();
+      if (bk && keys.has(bk)) byKey.set(bk, b);
+    }
+  };
+
+  const linkKeys = new Set<string>();
+  for (const partId of displayedPartIds) {
+    for (const bk of normalizedBoltSteelGuidsForPart(partId, boltSteelLinks)) {
+      linkKeys.add(bk);
+    }
+    for (const bk of normalizedBoltSteelGuidsForBoltLinkReach(partId, assemblies, boltSteelLinks)) {
+      linkKeys.add(bk);
+    }
+  }
+  take(linkKeys);
+
+  const rows = [...byKey.values()];
+  if (!boltSteelLinks?.length) return rows;
+
+  return rows.filter((b) => {
+    const verdict = boltSteelLinkNamesDisplayedPart(b.id, displayedPartIds, boltSteelLinks);
+    return verdict !== false;
+  });
+}
+
 /** All steel part IFC GlobalIds sitting in assemblies that contain `partId`. */
 export function steelPartGuidsSharingAssembliesWith(
   partId: string,
